@@ -46,14 +46,14 @@ async def lifespan(app):
     init_db()
     yield
 
-app = FastAPI(title='OPERA AI — Démonstration', version='0.1.1', lifespan=lifespan)
+app = FastAPI(title='OPERA AI — Démonstration', version='0.3.0', lifespan=lifespan)
 
 @app.middleware('http')
 async def protect_public_demo(request: Request, call_next):
     # Public demo: prevent unauthenticated modifications of the shared database.
-    if os.environ.get('OPERA_PUBLIC_DEMO', '0') == '1' and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+    if os.environ.get('OPERA_PUBLIC_DEMO', '1') == '1' and request.url.path.startswith('/api/'):
         from fastapi.responses import JSONResponse
-        return JSONResponse({'detail': 'Démonstration publique en lecture seule.'}, status_code=403)
+        return JSONResponse({'detail': 'API désactivée dans la démonstration publique.'}, status_code=403)
     return await call_next(request)
 
 

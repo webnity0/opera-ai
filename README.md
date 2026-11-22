@@ -1,37 +1,15 @@
-# OPERA AI — MVP indépendant v0.1
+# OPERA AI 0.3 — Démo publique (données fictives seulement)
 
-Application locale indépendante, développée avec FastAPI + SQLite + HTML/CSS/JavaScript. **Démo technique uniquement**.
+Interface de suivi documentaire des sous-traitants : entreprises, échéances, recherche, filtre de statut/date, modification de date, relances manuelles, export JSON/CSV et jeu de données fictives.
 
-## Démarrage
+**Limites :** pas d’IA réelle, pas d’authentification, pas de stockage sécurisé, pas d’envoi automatique. Les données sont stockées dans le navigateur (`localStorage`), non synchronisées entre appareils. API désactivée par défaut sur la démo publique. Ne pas saisir de données personnelles ou clients.
 
-Installer Python 3.11+ puis, dans ce dossier :
+## Render
+- Build : `pip install -r requirements.txt`
+- Start : `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- Root directory : vide
+- Branch : main
+- En cas de dépôt public non connecté, redéployer manuellement la dernière version depuis Render.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows : .venv\\Scripts\\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-Ouvrir http://127.0.0.1:8000 dans un navigateur. La base SQLite est créée localement sous `opera.db`.
-
-## Fonctions disponibles
-- Ajouter et supprimer des entreprises sous-traitantes
-- Enregistrer des types de documents, références et dates d'expiration (métadonnées uniquement)
-- Voir les statuts expiré / échéance à 30 jours / valide
-- Générer des modèles de relance à copier (sans envoi automatique)
-- API JSON documentée à http://127.0.0.1:8000/docs
-
-## Non inclus et limites critiques
-- Pas d'authentification, de rôles ou d'isolation multi-tenant
-- Pas de stockage ni de téléversement de fichiers, pas d'analyse IA
-- Pas de vérification de conformité juridique ou d'authenticité des pièces
-- Pas de paiements, de sauvegardes automatiques, de journal d'audit, de RGPD opérationnalisé
-- **Ne pas publier sur Internet, ne pas charger de données réelles de clients.**
-
-## Prochaines étapes
-1. Entretiens avec 10 PME et validation du problème / prix
-2. Authentification sécurisée, multi-tenant et contrôles d'accès
-3. Stockage sécurisé et politique de conservation des fichiers
-4. Analyse IA avec validation humaine et tests qualité
-5. Hébergement, domaine, conformité et pilotes payants
+## Mise à jour depuis 0.2
+La clé de stockage local passe de `opera_ai_demo_02` à `opera_ai_demo_03` : les données de démonstration précédentes ne sont pas migrées.

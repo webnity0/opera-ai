@@ -1,7 +1,8 @@
-# OPERA AI — démo publique uniquement
+# Mise à jour GitHub / Render
 
-Importer le CONTENU de ce dossier à la racine du dépôt GitHub (pas le ZIP).
-Sur Render : New > Web Service > Public Git Repository > https://github.com/webnity0/opera-ai
-Runtime : Python ; Build : pip install -r requirements.txt ; Start : uvicorn app.main:app --host 0.0.0.0 --port $PORT
-Environment : OPERA_PUBLIC_DEMO=1 ; plan gratuit si disponible.
-ATTENTION : la démo est volontairement en lecture seule. Pas d'authentification, de persistance garantie, ni de stockage sécurisé. Ne pas utiliser avec des données réelles.
+1. Décompresser l’archive. Dans GitHub `webnity0/opera-ai`, utiliser **Add file → Upload files**. Glisser **les fichiers et dossiers contenus dans l’archive**, pas l’archive ZIP.
+2. Vérifier que `app/main.py`, `app/static/index.html`, `requirements.txt` sont à la racine et valider **Commit changes**.
+3. Dans Render, service `opera-ai`, utiliser **Manual Deploy → Deploy latest commit** si la mise à jour ne part pas automatiquement.
+4. Ouvrir le site, vérifier le badge `DÉMO · 0.3`, cliquer sur **Charger un exemple fictif**, puis tester les filtres et l’export CSV.
+
+**Aucune donnée réelle :** démo publique sans authentification.
