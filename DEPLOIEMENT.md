@@ -1,8 +1,7 @@
-# Mise à jour GitHub / Render
+# Déploiement OPERA AI 1.0 Beta
 
-1. Décompresser l’archive. Dans GitHub `webnity0/opera-ai`, utiliser **Add file → Upload files**. Glisser **les fichiers et dossiers contenus dans l’archive**, pas l’archive ZIP.
-2. Vérifier que `app/main.py`, `app/static/index.html`, `requirements.txt` sont à la racine et valider **Commit changes**.
-3. Dans Render, service `opera-ai`, utiliser **Manual Deploy → Deploy latest commit** si la mise à jour ne part pas automatiquement.
-4. Ouvrir le site, vérifier le badge `DÉMO · 0.3`, cliquer sur **Charger un exemple fictif**, puis tester les filtres et l’export CSV.
+Ne pas remplacer l'application publique 0.3 sans prévoir PostgreSQL et les variables d'environnement. Conserver une sauvegarde de la version 0.3. L'ancienne démo stockait les données fictives dans le navigateur; la bêta repart avec une base serveur séparée.
 
-**Aucune donnée réelle :** démo publique sans authentification.
+Sur Render : ajouter `DATABASE_URL` vers une base PostgreSQL persistante; ajouter `SECRET_KEY` (valeur aléatoire de 48 caractères ou plus); garder `COOKIE_SECURE=1`; déclencher Manual Deploy > Deploy latest commit.
+
+Cette version ne doit pas être commercialisée ni recevoir des données clients avant validation de la sécurité et du RGPD.

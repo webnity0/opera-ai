@@ -1,10 +1,13 @@
 services:
   - type: web
-    name: opera-ai-demo
+    name: opera-ai
     runtime: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: OPERA_PUBLIC_DEMO
-        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: '1'
+      - key: DATABASE_URL
+        sync: false
