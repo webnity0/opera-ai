@@ -38,3 +38,6 @@ Les tests locaux utilisent SQLite temporaire et simulent Stripe/SMTP : aucune tr
 - Limitation de débit ajoutée à l'import PDF et contrôles de concurrence supplémentaires ; désactivation des relances si catégorie, entreprise ou échéance changent ; en-têtes navigateur renforcés.
 - 19 tests locaux réussis sur SQLite, vérifications syntaxiques Python et JavaScript. Deux avertissements de dépréciation des tests de cookies. Pas de validation nouvelle en navigateur ni sur PostgreSQL/Render.
 - Version destinée à un pilote public de démonstration, pas à la facturation ou au traitement de données clients réelles.
+
+## RC7 — Tarifs Sandbox
+Six tarifs intégrés avec validation côté serveur du montant, de la devise et de la périodicité. Sélection mensuelle/annuelle sur la page commerciale et dans les paramètres, Stripe Checkout hébergé, suivi du plan via webhook signé. Les droits par offre et l’essai de 14 jours ne sont pas encore appliqués : accès pilote gratuit. Aucun paiement réel. Tests Stripe simulés, à confirmer sur le Sandbox.

@@ -17,9 +17,11 @@ def test_optional_services_and_billing(monkeypatch):
     assert a.post('/webhooks/stripe',content=b'{}').status_code==400
     for k,v in {'STRIPE_SECRET_KEY':'sk_test_example','STRIPE_PRICE_ID':'price_example','STRIPE_WEBHOOK_SECRET':'whsec_example','PUBLIC_URL':'https://example.com'}.items():monkeypatch.setenv(k,v)
     def stripe(path,data=None):
+        if path.startswith('prices/'):return {'id':path.split('/')[1],'livemode':False,'active':True,'currency':'eur','unit_amount':3900,'recurring':{'interval':'month','interval_count':1}}
+        if path.startswith('checkout/sessions?') or path.startswith('subscriptions?'):return {'data':[]}
         if path=='customers':return {'id':'cus_test_rc3'}
         if path=='checkout/sessions':return {'url':'https://checkout.stripe.com/test'}
-        if path=='subscriptions/sub_test':return {'id':'sub_test','customer':'cus_test_rc3','status':'active'}
+        if path=='subscriptions/sub_test':return {'id':'sub_test','customer':'cus_test_rc3','status':'active','items':{'data':[{'price':{'id':integrations.PLANS['essential_monthly'][0]}}]}}
         raise AssertionError(path)
     monkeypatch.setattr(integrations,'stripe_request',stripe)
     assert a.post('/api/billing/checkout').json()['url'].startswith('https://checkout.stripe.com')

@@ -100,7 +100,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 Base.metadata.create_all(engine)  # Beta only; production migrations should use Alembic.
-app = FastAPI(title='OPERA AI', version='2.0-rc6', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='OPERA AI', version='2.0-rc7', docs_url=None, redoc_url=None, openapi_url=None)
 
 _pdf_requests = BoundedSemaphore(2)
 
@@ -207,7 +207,7 @@ def health():
         with engine.connect() as connection: connection.execute(text('SELECT 1'))
     except Exception:
         raise HTTPException(503, 'Base indisponible')
-    return {'status': 'ok', 'version': '2.0-rc6'}
+    return {'status': 'ok', 'version': '2.0-rc7'}
 
 @app.post('/api/register', dependencies=[Depends(csrf_guard)])
 def register(payload: RegisterIn, response: Response, request: Request, session: Session = Depends(db)):
@@ -438,6 +438,11 @@ class Billing(Base):
     subscription_id: Mapped[str] = mapped_column(String(100),default='')
     state: Mapped[str] = mapped_column(String(30),default='none')
 
+class BillingPlan(Base):
+    __tablename__='billing_plans'
+    org_id: Mapped[int] = mapped_column(ForeignKey('organizations.id'),primary_key=True)
+    plan: Mapped[str] = mapped_column(String(40),default='')
+
 class AutoReminder(Base):
     __tablename__='auto_reminders'
     document_id: Mapped[int] = mapped_column(ForeignKey('documents.id',ondelete='CASCADE'),primary_key=True)
@@ -451,23 +456,33 @@ Base.metadata.create_all(engine)
 def capabilities(user:User=Depends(me),session:Session=Depends(db)):
     from .ocr_tools import available
     b=session.get(Billing,user.org_id)
-    return {'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
+    plan=session.get(BillingPlan,user.org_id)
+    return {'plan':plan.plan if plan and b and b.state in ('active','trialing') else '', 'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
 
 @app.post('/api/billing/checkout',dependencies=[Depends(csrf_guard)])
-def checkout(request:Request,user:User=Depends(me),session:Session=Depends(db)):
+def checkout(request:Request,plan:str='essential_monthly',user:User=Depends(me),session:Session=Depends(db)):
     rate_limit(request,'checkout',5)
     if not integrations.billing_ready(): raise HTTPException(503,'Paiement non configuré')
     # Real charges must not be enabled accidentally during pilot testing.
     if not os.getenv('STRIPE_SECRET_KEY','').startswith('sk_test_'): raise HTTPException(403,'Paiement réel désactivé')
     base=os.environ['PUBLIC_URL'].rstrip('/')
     if not base.startswith('https://'): raise HTTPException(503,'URL publique HTTPS requise')
+    if plan not in integrations.PLANS: raise HTTPException(422,'Offre inconnue')
     try:
+        price_id=integrations.checked_price(plan)
+        # Serialize checkout creation per organization in PostgreSQL.
+        if engine.dialect.name=='postgresql': session.execute(text('SELECT pg_advisory_xact_lock(7831, :org)'),{'org':user.org_id})
         b=session.get(Billing,user.org_id)
         if not b:
             customer=integrations.stripe_request('customers',{'email':user.email,'metadata[org_id]':str(user.org_id)})
-            b=Billing(org_id=user.org_id,customer_id=customer['id']);session.add(b);session.commit()
+            b=Billing(org_id=user.org_id,customer_id=customer['id']);session.add(b);session.flush()
         if b.state in ('active','trialing','past_due','unpaid','incomplete'): raise HTTPException(409,'Gérez votre abonnement existant')
-        result=integrations.stripe_request('checkout/sessions',{'mode':'subscription','customer':b.customer_id,'line_items[0][price]':os.environ['STRIPE_PRICE_ID'],'line_items[0][quantity]':'1','success_url':base+'/?payment=returned','cancel_url':base+'/?payment=cancelled'})
+        existing=integrations.stripe_request('checkout/sessions?customer='+quote(b.customer_id,safe='')+'&status=open&limit=100')
+        if existing.get('data'): raise HTTPException(409,'Un paiement est déjà en cours. Terminez-le ou attendez son expiration.')
+        subscriptions=integrations.stripe_request('subscriptions?customer='+quote(b.customer_id,safe='')+'&status=all&limit=100')
+        if any(x.get('status') in ('active','trialing','past_due','unpaid','incomplete','paused') for x in subscriptions.get('data',[])): raise HTTPException(409,'Gérez votre abonnement existant')
+        result=integrations.stripe_request('checkout/sessions',{'mode':'subscription','customer':b.customer_id,'line_items[0][price]':price_id,'line_items[0][quantity]':'1','success_url':base+'/?payment=returned','cancel_url':base+'/?payment=cancelled'})
+        session.commit()
         return {'url':result['url']}
     except HTTPException: raise
     except Exception: raise HTTPException(502,'Service de paiement indisponible')
@@ -487,14 +502,24 @@ async def stripe_webhook(request:Request,session:Session=Depends(db)):
     if not secret or not integrations.valid_stripe_signature(body,request.headers.get('stripe-signature',''),secret): raise HTTPException(400,'Signature invalide')
     try: event=json.loads(body); obj=event['data']['object']
     except (ValueError,KeyError,TypeError): raise HTTPException(400,'Événement invalide')
+    if event.get('livemode') is True: raise HTTPException(400,'Événement réel refusé')
     if event.get('type') in ('customer.subscription.created','customer.subscription.updated','customer.subscription.deleted'):
         b=session.scalar(select(Billing).where(Billing.customer_id==obj.get('customer')))
         if b:
             # Fetch current Stripe state to avoid replay/out-of-order stale updates.
             try: current=integrations.stripe_request('subscriptions/'+obj['id'])
             except Exception: raise HTTPException(502,'Vérification Stripe indisponible')
-            if current.get('customer')==b.customer_id:
-                b.subscription_id=current['id'];b.state=current['status'];session.commit()
+            if current.get('customer')==b.customer_id and current.get('livemode') is not True:
+                # An old cancelled subscription must not overwrite a different active one.
+                if b.subscription_id and b.subscription_id!=current['id'] and current['status'] not in ('active','trialing') and b.state in ('active','trialing'):
+                    return {'received':True}
+                items=current.get('items',{}).get('data',[])
+                price_id=items[0].get('price',{}).get('id') if len(items)==1 and items[0].get('quantity',1)==1 else None
+                plan=next((k for k,v in integrations.PLANS.items() if v[0]==price_id),'')
+                record=session.get(BillingPlan,b.org_id)
+                if not record: record=BillingPlan(org_id=b.org_id);session.add(record)
+                record.plan=plan
+                b.subscription_id=current['id'];b.state=current['status'] if plan or current['status'] not in ('active','trialing') else 'unrecognized';session.commit()
     return {'received':True}
 
 @app.get('/api/auto-reminders')
