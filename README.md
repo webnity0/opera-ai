@@ -1,35 +1,21 @@
-# OPERA AI 1.0 Beta
+# OPERA AI — 1.1 Pilote
 
-Bêta fonctionnelle de suivi des sous-traitants et des échéances documentaires.
+Suivi administratif des sous-traitants du bâtiment. Version pilote, destinée exclusivement aux données fictives jusqu'à validation de production.
 
-## Fonctionnel
-- Inscription/connexion, mots de passe Argon2, cookie signé HttpOnly et Secure
-- Espaces organisationnels isolés dans chaque requête
-- Gestion des entreprises et des métadonnées de documents
-- Statuts d'expiration, recherche, filtres, modèles de relance à copier
-- Export CSV et journal d'actions récent
-- PostgreSQL via DATABASE_URL (SQLite seulement pour développement local)
+## Fonctionnalités
+- Comptes et espaces organisationnels, suivi des entreprises et échéances, tableau de bord, recherche, export CSV, historique et modèles de relance manuels.
+- Import PDF (10 Mio, 30 pages, 100 fichiers par organisation en usage séquentiel), stockage binaire en base, téléchargement authentifié et suppression avec la fiche.
+- Extraction locale de texte des dix premières pages : suggestions de catégorie et d'échéance explicite. Validation humaine obligatoire ; PDF scannés, dates ambiguës et documents non reconnus à renseigner manuellement. Ce moteur utilise des règles, pas un LLM ni de l'OCR.
+- Protection de base : Argon2, cookies signés HttpOnly/SameSite/Secure en production, contrôle d'origine, limites de requête et de tentatives par processus, vérifications organisationnelles, export CSV protégé.
 
-## Non disponible
-- Import de fichiers PDF, stockage de documents, OCR/IA, envoi automatique d'e-mails, Stripe, invitation d'utilisateurs, réinitialisation de mot de passe.
-- Pas d'audit sécurité indépendant, de sauvegardes vérifiées, ni de conformité RGPD démontrée.
-
-## Lancer en local
-```bash
+## Démarrer en local
+```sh
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 COOKIE_SECURE=0 uvicorn app.main:app --reload
 ```
+Ouvrir http://127.0.0.1:8000. Tests : `python -m pytest -q` (base SQLite temporaire isolée). Voir DEPLOIEMENT.md pour Render.
 
-## Déployer sur Render
-1. Créer une base PostgreSQL persistante, relever son **Internal Database URL**.
-2. Dans le service web Render, définir `DATABASE_URL` (URL PostgreSQL), `SECRET_KEY` (long secret aléatoire stable) et `COOKIE_SECURE=1`.
-3. Utiliser Build `pip install -r requirements.txt` et Start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-4. Déployer et tester `/health`, inscription, déconnexion et isolation des organisations.
-
-**Attention** : ne déployez pas cette bêta avec SQLite sur Render Free pour de vrais clients : le disque est éphémère. Ne saisissez aucune donnée réelle/confidentielle avant revue sécurité, conformité, sauvegardes, politiques de confidentialité et processus de récupération de compte.
-
-## Architecture
-`app/main.py` : API FastAPI + modèles SQLAlchemy. `app/static/index.html` : interface autonome.
-
-## Sécurité restant à renforcer avant commercialisation
-Rate limiting, vérification e-mail, reset mot de passe, MFA, protection CSRF plus complète, migration Alembic, tests d'intrusion, isolation multi-tenant en profondeur, surveillance, sauvegardes/restauration, contrats de sous-traitance, journalisation et rétention.
+## Limites / avant commercialisation
+Stripe, abonnements, OCR, LLM, envoi automatique des relances, récupération de compte et vérification e-mail ne sont pas implémentés. Aucune promesse de conformité réglementaire ni de validation d'authenticité des attestations. La limitation de débit est locale au processus ; les sessions signées ne sont pas révoquées côté serveur au logout. Les contrôles PDF ne constituent pas un antivirus ni un bac à sable. Prévoir analyse de fichiers isolée, quotas transactionnels, protection contre les PDF malveillants, contrôle d'accès et tests indépendants, sauvegardes/restauration, migrations versionnées, surveillance, politique de confidentialité, RGPD et conditions contractuelles avant données réelles. PostgreSQL et navigateur de production non testés dans cette livraison.

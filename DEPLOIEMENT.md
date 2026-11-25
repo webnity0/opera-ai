@@ -1,7 +1,11 @@
-# Déploiement OPERA AI 1.0 Beta
+# Déploiement OPERA AI 1.1 Pilote
 
-Ne pas remplacer l'application publique 0.3 sans prévoir PostgreSQL et les variables d'environnement. Conserver une sauvegarde de la version 0.3. L'ancienne démo stockait les données fictives dans le navigateur; la bêta repart avec une base serveur séparée.
+1. Sauvegarder la version GitHub actuelle et la base PostgreSQL. Préférer un service Render et une base de test distincts.
+2. Décompresser l'archive. Mettre les fichiers et dossiers à la racine du repository (pas dans un dossier supplémentaire). Conserver app/ et tests/ avec leur structure. Ne jamais envoyer de .env ou de secrets sur GitHub.
+3. Sur Render, vérifier la branche main, Build Command `pip install -r requirements.txt`, Start Command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+4. Variables : DATABASE_URL = Internal Database URL de PostgreSQL persistant ; SECRET_KEY = secret stable d'au moins 48 caractères ; COOKIE_SECURE = 1. Ne pas changer le secret existant sans raison. Le démarrage sur Render refuse SQLite ou une configuration de sécurité insuffisante.
+5. Manual Deploy > Deploy latest commit. La nouvelle table attachments est créée au démarrage, sans modifier les colonnes existantes ; sauvegarde préalable requise.
+6. Vérifier /health (version 1.1-pilot). Créer deux comptes fictifs, ajouter une entreprise, importer un petit PDF fictif, analyser, confirmer la date, télécharger, vérifier que le second compte ne voit pas le fichier, supprimer, tester export et déconnexion. Tester aussi sur mobile. Redémarrer et vérifier la persistance.
+7. En cas d'échec, revenir au commit précédent ; ne pas supprimer la base ni les tables sans sauvegarde.
 
-Sur Render : ajouter `DATABASE_URL` vers une base PostgreSQL persistante; ajouter `SECRET_KEY` (valeur aléatoire de 48 caractères ou plus); garder `COOKIE_SECURE=1`; déclencher Manual Deploy > Deploy latest commit.
-
-Cette version ne doit pas être commercialisée ni recevoir des données clients avant validation de la sécurité et du RGPD.
+**Lancement autorisé uniquement en démonstration avec données fictives.** Pas d'abonnement facturé ni de données clients avant les validations décrites dans README.md.
