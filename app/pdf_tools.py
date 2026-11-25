@@ -4,6 +4,7 @@ import re
 import unicodedata
 from datetime import date
 from pypdf import PdfReader
+from .ocr_tools import extract_scan
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_PAGES = 30
@@ -42,6 +43,13 @@ def analyze_pdf(data):
         except Exception:
             continue
     text = '\n'.join(parts)[:60000]
+    method = 'text_rules'
+    if not text.strip():
+        text = extract_scan(data, len(reader.pages))
+        if text.strip(): method = 'ocr_rules'
+    return analyze_text(text, len(reader.pages), method)
+
+def analyze_text(text, pages=1, method='text_rules'):
     plain = ''.join(c for c in unicodedata.normalize('NFKD', text.lower()) if not unicodedata.combining(c))
     kinds = [('decennale','Assurance décennale'),('vigilance','Attestation de vigilance URSSAF'),('urssaf','Attestation URSSAF'),('kbis','Extrait Kbis'),('responsabilite civile','Responsabilité civile'),('assurance','Attestation d’assurance')]
     kind = next((label for key,label in kinds if key in plain), '')
@@ -51,4 +59,12 @@ def analyze_pdf(data):
             value = date(int(m[3]),int(m[2]),int(m[1])).isoformat()
             if value not in candidates: candidates.append(value)
         except ValueError: pass
-    return {'kind':kind,'expiry':candidates[0] if len(candidates)==1 else '', 'candidate_dates':candidates,'text_found':bool(text.strip()),'pages':len(reader.pages),'method':'text_rules','warning':'Suggestions à vérifier sur le document original. Les PDF scannés nécessitent une saisie manuelle.'}
+    # Accept only explicit end-of-validity dates, never infer legal deadlines.
+    for m in re.finditer(r'(?:expiration|echeance|valable jusqu[’\']?\s*au|fin de validite)\s*[:\-]?\s*(\d{4})-(\d{2})-(\d{2})', plain):
+        try:
+            value=date(int(m[1]),int(m[2]),int(m[3])).isoformat()
+            if value not in candidates: candidates.append(value)
+        except ValueError: pass
+    reference_matches = re.findall(r'(?:num[eé]ro|n[°º]|r[eé]f[eé]rence)\s*(?:de\s+)?(?:contrat|police|attestation)\s*[:#]?[ \t]*([A-Z0-9][A-Z0-9./-]{3,49})', text, re.I)
+    references=list(dict.fromkeys(reference_matches))
+    return {'reference':references[0] if len(references)==1 else '', 'kind':kind,'expiry':candidates[0] if len(candidates)==1 else '', 'candidate_dates':candidates,'text_found':bool(text.strip()),'pages':pages,'method':method,'warning':'Suggestions à vérifier sur le document original. Si aucune date fiable ne ressort, renseignez-la manuellement.'}

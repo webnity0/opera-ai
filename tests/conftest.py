@@ -8,3 +8,9 @@ atexit.register(_tmp.cleanup)
 os.environ['DATABASE_URL'] = 'sqlite:///' + str(Path(_tmp.name) / 'test.db')
 os.environ['COOKIE_SECURE'] = '0'
 os.environ.pop('RENDER', None)
+
+import pytest
+@pytest.fixture(autouse=True)
+def reset_test_rate_limits():
+    from app.main import _attempts
+    _attempts.clear()

@@ -3,18 +3,21 @@ import csv
 import io
 import os
 import secrets
+import hashlib
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from .pdf_tools import validate_pdf, analyze_pdf, MAX_BYTES
+from .pdf_tools import MAX_BYTES
+from .pdf_isolation import process_pdf
 from sqlalchemy.exc import IntegrityError
 from threading import Lock
 from time import monotonic
+from threading import BoundedSemaphore
 from collections import deque
 from urllib.parse import quote
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, LargeBinary, select, func, delete
+from sqlalchemy import create_engine, String, Integer, ForeignKey, Date, DateTime, LargeBinary, select, func, delete, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, Session
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
@@ -83,8 +86,23 @@ class Audit(Base):
     action: Mapped[str] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+class LoginSession(Base):
+    __tablename__ = 'login_sessions'
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+class Reminder(Base):
+    __tablename__ = 'reminders'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey('organizations.id'), index=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey('documents.id'), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 Base.metadata.create_all(engine)  # Beta only; production migrations should use Alembic.
-app = FastAPI(title='OPERA AI', version='1.1-pilot', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='OPERA AI', version='2.0-rc6', docs_url=None, redoc_url=None, openapi_url=None)
+
+_pdf_requests = BoundedSemaphore(2)
 
 @app.middleware('http')
 async def security_headers(request: Request, call_next):
@@ -92,7 +110,7 @@ async def security_headers(request: Request, call_next):
         length = request.headers.get('content-length')
         if length is not None and not length.isdigit():
             return Response(status_code=411)
-        limit = MAX_BYTES + 65536 if request.url.path in ('/api/pdf/analyze','/api/documents/upload') else 65536
+        limit = MAX_BYTES + 65536 if (request.url.path in ('/api/pdf/analyze','/api/documents/upload') or (request.url.path.startswith('/api/documents/') and request.url.path.endswith('/renew'))) else 65536
         if length is not None and int(length) > limit: return Response(status_code=413)
         # Enforce actual streamed body length too, before multipart parsing.
         chunks = bytearray()
@@ -104,6 +122,8 @@ async def security_headers(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    if os.getenv('RENDER'): response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'no-cache'
     return response
@@ -116,11 +136,10 @@ def me(request: Request, session: Session = Depends(db)) -> User:
     token = request.cookies.get('opera_session')
     if not token:
         raise HTTPException(401, 'Connexion requise')
-    try:
-        uid = int(signer.loads(token, max_age=60*60*24*7))
-    except (BadSignature, SignatureExpired, ValueError):
+    entry = session.get(LoginSession, hashlib.sha256(token.encode()).hexdigest())
+    if not entry or entry.expires_at.replace(tzinfo=None) <= datetime.now(timezone.utc).replace(tzinfo=None):
         raise HTTPException(401, 'Session expirée')
-    user = session.get(User, uid)
+    user = session.get(User, entry.user_id)
     if not user:
         raise HTTPException(401, 'Compte introuvable')
     return user
@@ -171,8 +190,12 @@ class DocIn(BaseModel):
     reference: str = Field(default='', max_length=200)
     notes: str = Field(default='', max_length=500)
 
-def set_cookie(response, user):
-    response.set_cookie('opera_session', signer.dumps(str(user.id)), max_age=604800, httponly=True, secure=os.getenv('COOKIE_SECURE','1') == '1', samesite='lax', path='/')
+def set_cookie(response, user, session):
+    token = secrets.token_urlsafe(32)
+    session.execute(delete(LoginSession).where(LoginSession.user_id == user.id, LoginSession.expires_at < datetime.now(timezone.utc).replace(tzinfo=None)))
+    session.add(LoginSession(token_hash=hashlib.sha256(token.encode()).hexdigest(), user_id=user.id, expires_at=datetime.now(timezone.utc).replace(tzinfo=None)+timedelta(days=7)))
+    session.commit()
+    response.set_cookie('opera_session', token, max_age=604800, httponly=True, secure=os.getenv('COOKIE_SECURE','1') == '1', samesite='lax', path='/')
 
 @app.get('/')
 def home():
@@ -180,13 +203,17 @@ def home():
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '1.1-pilot'}
+    try:
+        with engine.connect() as connection: connection.execute(text('SELECT 1'))
+    except Exception:
+        raise HTTPException(503, 'Base indisponible')
+    return {'status': 'ok', 'version': '2.0-rc6'}
 
 @app.post('/api/register', dependencies=[Depends(csrf_guard)])
 def register(payload: RegisterIn, response: Response, request: Request, session: Session = Depends(db)):
     rate_limit(request, 'register', 10)
     email = payload.email.strip().lower()
-    if '@' not in email or len(email.split('@')[-1]) < 3:
+    if len(payload.organization.strip()) < 2 or email.count('@') != 1 or any(c.isspace() for c in email) or not email.split('@')[0] or '.' not in email.split('@')[-1]:
         raise HTTPException(422, 'E-mail invalide')
     if session.scalar(select(User).where(User.email == email)):
         raise HTTPException(409, 'Adresse déjà utilisée')
@@ -198,7 +225,7 @@ def register(payload: RegisterIn, response: Response, request: Request, session:
     except IntegrityError:
         session.rollback(); raise HTTPException(409, 'Adresse déjà utilisée')
     log(session, user, 'Création du compte')
-    session.commit(); set_cookie(response, user)
+    session.commit(); set_cookie(response, user, session)
     return {'email': user.email, 'organization': org.name}
 
 @app.post('/api/login', dependencies=[Depends(csrf_guard)])
@@ -207,11 +234,15 @@ def login(payload: LoginIn, response: Response, request: Request, session: Sessi
     user = session.scalar(select(User).where(User.email == payload.email.strip().lower()))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, 'Identifiants incorrects')
-    set_cookie(response, user)
+    set_cookie(response, user, session)
     return {'email': user.email}
 
 @app.post('/api/logout', dependencies=[Depends(csrf_guard)])
-def logout(response: Response):
+def logout(response: Response, request: Request, session: Session = Depends(db)):
+    token = request.cookies.get('opera_session')
+    if token:
+        session.execute(delete(LoginSession).where(LoginSession.token_hash == hashlib.sha256(token.encode()).hexdigest()))
+        session.commit()
     response.delete_cookie('opera_session', path='/')
     return {'ok': True}
 
@@ -266,6 +297,8 @@ def edit_doc(document_id: int, payload: DocIn, user: User = Depends(me), session
     d = session.scalar(select(Document).where(Document.id == document_id, Document.org_id == user.org_id))
     c = session.scalar(select(Company).where(Company.id == payload.company_id, Company.org_id == user.org_id))
     if not d or not c: raise HTTPException(404, 'Document ou entreprise introuvable')
+    if d.company_id != payload.company_id or d.expiry != payload.expiry or d.kind != payload.kind:
+        session.execute(delete(AutoReminder).where(AutoReminder.document_id == d.id, AutoReminder.org_id == user.org_id))
     for key,value in payload.model_dump().items(): setattr(d,key,value)
     log(session,user,'Document modifié'); session.commit()
     return {'ok': True}
@@ -275,6 +308,8 @@ def delete_doc(document_id: int, user: User = Depends(me), session: Session = De
     d = session.scalar(select(Document).where(Document.id == document_id, Document.org_id == user.org_id))
     if not d: raise HTTPException(404, 'Document introuvable')
     session.execute(delete(Attachment).where(Attachment.document_id == d.id, Attachment.org_id == user.org_id))
+    session.execute(delete(Reminder).where(Reminder.document_id == d.id, Reminder.org_id == user.org_id))
+    session.execute(delete(AutoReminder).where(AutoReminder.document_id == d.id, AutoReminder.org_id == user.org_id))
     session.delete(d); log(session,user,'Document supprimé'); session.commit()
     return {'ok': True}
 
@@ -300,23 +335,32 @@ def export_csv(user: User = Depends(me), session: Session = Depends(db)):
     return Response('\ufeff'+buf.getvalue(), media_type='text/csv; charset=utf-8', headers={'Content-Disposition':'attachment; filename="opera-export.csv"'})
 
 
-def read_pdf(file):
-    data = file.file.read(MAX_BYTES + 1)
-    try: validate_pdf(data)
-    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
-    return data
+def checked_pdf(data,mode):
+    if not _pdf_requests.acquire(blocking=False): raise HTTPException(503,'Analyse occupée, réessayez dans un instant')
+    try:
+        try: return process_pdf(data,mode)
+        except ValueError as exc: raise HTTPException(422,str(exc)) from exc
+        except RuntimeError as exc: raise HTTPException(503,str(exc)) from exc
+    finally: _pdf_requests.release()
 
 @app.post('/api/pdf/analyze', dependencies=[Depends(csrf_guard)])
 def pdf_analysis(request: Request, file: UploadFile = File(...), user: User = Depends(me)):
     rate_limit(request, 'pdf', 20)
-    data = read_pdf(file)
-    return analyze_pdf(data)
+    return checked_pdf(file.file.read(MAX_BYTES+1),'analyze')
 
 @app.post('/api/documents/upload', dependencies=[Depends(csrf_guard)])
-def upload_document(file: UploadFile = File(...), company_id: int = Form(...), kind: str = Form(..., min_length=2,max_length=150), expiry: date = Form(...), reference: str = Form('',max_length=200), notes: str = Form('',max_length=500), user: User = Depends(me), session: Session = Depends(db)):
+def upload_document(request: Request, file: UploadFile = File(...), company_id: int = Form(...), kind: str = Form(..., min_length=2,max_length=150), expiry: date = Form(...), reference: str = Form('',max_length=200), notes: str = Form('',max_length=500), user: User = Depends(me), session: Session = Depends(db)):
     c = session.scalar(select(Company).where(Company.id == company_id, Company.org_id == user.org_id))
     if not c: raise HTTPException(404, 'Entreprise introuvable')
-    data = read_pdf(file)
+    rate_limit(request,'pdf',20)
+    data = file.file.read(MAX_BYTES+1)
+    checked_pdf(data,'validate')
+    if engine.dialect.name == 'postgresql':
+        session.execute(text('SELECT pg_advisory_xact_lock(726381)'))
+    used = session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id == user.org_id))
+    total = session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)))
+    if used + len(data) > 50*1024*1024 or total + len(data) > 400*1024*1024:
+        raise HTTPException(409, 'Quota de stockage pilote atteint')
     count = session.scalar(select(func.count()).select_from(Attachment).where(Attachment.org_id == user.org_id))
     if count >= 100: raise HTTPException(409, 'Limite pilote : 100 PDF par organisation')
     d = Document(org_id=user.org_id,company_id=company_id,kind=kind,expiry=expiry,reference=reference,notes=notes)
@@ -332,3 +376,231 @@ def download_pdf(document_id: int, user: User = Depends(me), session: Session = 
     a = session.scalar(select(Attachment).join(Document, Attachment.document_id == Document.id).where(Attachment.document_id == document_id, Attachment.org_id == user.org_id, Document.org_id == user.org_id))
     if not a: raise HTTPException(404, 'PDF introuvable')
     return Response(a.data, media_type='application/octet-stream', headers={'Content-Disposition':"attachment; filename=\"document.pdf\"; filename*=UTF-8''"+quote(a.filename,safe='')})
+
+
+class SettingsIn(BaseModel):
+    organization: str = Field(min_length=2,max_length=150)
+class PasswordIn(BaseModel):
+    current: str = Field(max_length=128)
+    new: str = Field(min_length=12,max_length=128)
+
+@app.put('/api/settings', dependencies=[Depends(csrf_guard)])
+def settings(payload: SettingsIn, user: User = Depends(me), session: Session = Depends(db)):
+    org = session.get(Organization, user.org_id)
+    if len(payload.organization.strip()) < 2: raise HTTPException(422,'Nom invalide')
+    org.name = payload.organization.strip()
+    log(session,user,'Paramètres modifiés'); session.commit()
+    return {'ok':True}
+
+@app.post('/api/password', dependencies=[Depends(csrf_guard)])
+def password(payload: PasswordIn, request: Request, response: Response, user: User = Depends(me), session: Session = Depends(db)):
+    rate_limit(request,'password',5)
+    if not verify_password(payload.current,user.password_hash): raise HTTPException(400,'Mot de passe actuel incorrect')
+    user.password_hash = hasher.hash(payload.new)
+    session.execute(delete(LoginSession).where(LoginSession.user_id == user.id))
+    log(session,user,'Mot de passe modifié'); session.commit()
+    response.delete_cookie('opera_session',path='/')
+    return {'ok':True}
+
+@app.put('/api/companies/{company_id}', dependencies=[Depends(csrf_guard)])
+def edit_company(company_id:int,payload:CompanyIn,user:User=Depends(me),session:Session=Depends(db)):
+    c=session.scalar(select(Company).where(Company.id==company_id,Company.org_id==user.org_id))
+    if not c: raise HTTPException(404,'Entreprise introuvable')
+    if c.email != payload.email:
+        session.execute(delete(AutoReminder).where(AutoReminder.org_id==user.org_id, AutoReminder.document_id.in_(select(Document.id).where(Document.company_id==c.id,Document.org_id==user.org_id))))
+    for k,v in payload.model_dump().items(): setattr(c,k,v)
+    log(session,user,'Entreprise modifiée'); session.commit()
+    return {'ok':True}
+
+@app.get('/api/reminders')
+def reminders(user:User=Depends(me),session:Session=Depends(db)):
+    rows=session.execute(select(Reminder.document_id,func.max(Reminder.created_at)).where(Reminder.org_id==user.org_id).group_by(Reminder.document_id)).all()
+    return {str(i):dt.isoformat() for i,dt in rows}
+
+@app.post('/api/reminders/{document_id}', dependencies=[Depends(csrf_guard)])
+def reminder(document_id:int,user:User=Depends(me),session:Session=Depends(db)):
+    d=session.scalar(select(Document).where(Document.id==document_id,Document.org_id==user.org_id))
+    if not d: raise HTTPException(404,'Document introuvable')
+    session.add(Reminder(org_id=user.org_id,document_id=d.id))
+    log(session,user,'Relance déclarée envoyée'); session.commit()
+    return {'ok':True}
+
+# Optional integrations. The pilot never activates real payments by default.
+from . import integrations as integrations
+import hmac
+import json
+from fastapi import Header
+
+class Billing(Base):
+    __tablename__='billing_accounts'
+    org_id: Mapped[int] = mapped_column(ForeignKey('organizations.id'),primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(100),unique=True)
+    subscription_id: Mapped[str] = mapped_column(String(100),default='')
+    state: Mapped[str] = mapped_column(String(30),default='none')
+
+class AutoReminder(Base):
+    __tablename__='auto_reminders'
+    document_id: Mapped[int] = mapped_column(ForeignKey('documents.id',ondelete='CASCADE'),primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey('organizations.id'),index=True)
+    last_expiry: Mapped[str] = mapped_column(String(10),default='')
+    last_stage: Mapped[int] = mapped_column(Integer,default=0)
+
+Base.metadata.create_all(engine)
+
+@app.get('/api/capabilities')
+def capabilities(user:User=Depends(me),session:Session=Depends(db)):
+    from .ocr_tools import available
+    b=session.get(Billing,user.org_id)
+    return {'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
+
+@app.post('/api/billing/checkout',dependencies=[Depends(csrf_guard)])
+def checkout(request:Request,user:User=Depends(me),session:Session=Depends(db)):
+    rate_limit(request,'checkout',5)
+    if not integrations.billing_ready(): raise HTTPException(503,'Paiement non configuré')
+    # Real charges must not be enabled accidentally during pilot testing.
+    if not os.getenv('STRIPE_SECRET_KEY','').startswith('sk_test_'): raise HTTPException(403,'Paiement réel désactivé')
+    base=os.environ['PUBLIC_URL'].rstrip('/')
+    if not base.startswith('https://'): raise HTTPException(503,'URL publique HTTPS requise')
+    try:
+        b=session.get(Billing,user.org_id)
+        if not b:
+            customer=integrations.stripe_request('customers',{'email':user.email,'metadata[org_id]':str(user.org_id)})
+            b=Billing(org_id=user.org_id,customer_id=customer['id']);session.add(b);session.commit()
+        if b.state in ('active','trialing','past_due','unpaid','incomplete'): raise HTTPException(409,'Gérez votre abonnement existant')
+        result=integrations.stripe_request('checkout/sessions',{'mode':'subscription','customer':b.customer_id,'line_items[0][price]':os.environ['STRIPE_PRICE_ID'],'line_items[0][quantity]':'1','success_url':base+'/?payment=returned','cancel_url':base+'/?payment=cancelled'})
+        return {'url':result['url']}
+    except HTTPException: raise
+    except Exception: raise HTTPException(502,'Service de paiement indisponible')
+
+@app.post('/api/billing/portal',dependencies=[Depends(csrf_guard)])
+def billing_portal(user:User=Depends(me),session:Session=Depends(db)):
+    b=session.get(Billing,user.org_id)
+    if not os.getenv('STRIPE_SECRET_KEY','').startswith('sk_test_'): raise HTTPException(403,'Paiement réel désactivé')
+    if not integrations.billing_ready() or not b: raise HTTPException(404,'Aucun compte de facturation')
+    try: return {'url':integrations.stripe_request('billing_portal/sessions',{'customer':b.customer_id,'return_url':os.environ['PUBLIC_URL'].rstrip('/')+'/'} )['url']}
+    except Exception: raise HTTPException(502,'Portail indisponible')
+
+@app.post('/webhooks/stripe')
+async def stripe_webhook(request:Request,session:Session=Depends(db)):
+    if os.getenv('STRIPE_SECRET_KEY') and not os.getenv('STRIPE_SECRET_KEY','').startswith('sk_test_'): raise HTTPException(403,'Paiement réel désactivé')
+    secret=os.getenv('STRIPE_WEBHOOK_SECRET',''); body=await request.body()
+    if not secret or not integrations.valid_stripe_signature(body,request.headers.get('stripe-signature',''),secret): raise HTTPException(400,'Signature invalide')
+    try: event=json.loads(body); obj=event['data']['object']
+    except (ValueError,KeyError,TypeError): raise HTTPException(400,'Événement invalide')
+    if event.get('type') in ('customer.subscription.created','customer.subscription.updated','customer.subscription.deleted'):
+        b=session.scalar(select(Billing).where(Billing.customer_id==obj.get('customer')))
+        if b:
+            # Fetch current Stripe state to avoid replay/out-of-order stale updates.
+            try: current=integrations.stripe_request('subscriptions/'+obj['id'])
+            except Exception: raise HTTPException(502,'Vérification Stripe indisponible')
+            if current.get('customer')==b.customer_id:
+                b.subscription_id=current['id'];b.state=current['status'];session.commit()
+    return {'received':True}
+
+@app.get('/api/auto-reminders')
+def auto_list(user:User=Depends(me),session:Session=Depends(db)):
+    return list(session.scalars(select(AutoReminder.document_id).where(AutoReminder.org_id==user.org_id)))
+
+@app.put('/api/auto-reminders/{document_id}',dependencies=[Depends(csrf_guard)])
+def auto_enable(document_id:int,user:User=Depends(me),session:Session=Depends(db)):
+    if not integrations.mail_ready() or user.email not in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')}: raise HTTPException(503,'Envoi automatique non activé pour ce compte')
+    d=session.scalar(select(Document).where(Document.id==document_id,Document.org_id==user.org_id))
+    if not d: raise HTTPException(404,'Document introuvable')
+    c=session.get(Company,d.company_id)
+    if not c or c.org_id!=user.org_id or not c.email or '@' not in c.email: raise HTTPException(422,'Adresse de contact requise')
+    if not session.get(AutoReminder,d.id): session.add(AutoReminder(document_id=d.id,org_id=user.org_id));session.commit()
+    return {'ok':True}
+
+@app.delete('/api/auto-reminders/{document_id}',dependencies=[Depends(csrf_guard)])
+def auto_disable(document_id:int,user:User=Depends(me),session:Session=Depends(db)):
+    session.execute(delete(AutoReminder).where(AutoReminder.document_id==document_id,AutoReminder.org_id==user.org_id));session.commit();return {'ok':True}
+
+@app.post('/jobs/reminders')
+def run_reminders(x_job_secret:str=Header(default=''),session:Session=Depends(db)):
+    secret=os.getenv('REMINDER_JOB_SECRET','')
+    if not integrations.mail_ready() or len(secret)<32 or not hmac.compare_digest(secret,x_job_secret): raise HTTPException(403,'Non autorisé')
+    # One transaction per batch, advisory lock prevents overlapping jobs on PostgreSQL.
+    if engine.dialect.name=='postgresql':
+        if not session.scalar(text('SELECT pg_try_advisory_xact_lock(726382)')): return {'sent':0,'busy':True}
+    allowed={x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',') if x.strip()}
+    eligible=select(User.org_id).where(User.email.in_(allowed))
+    rows=session.execute(select(AutoReminder,Document,Company).join(Document,AutoReminder.document_id==Document.id).join(Company,Document.company_id==Company.id).where(AutoReminder.org_id==Document.org_id,Company.org_id==Document.org_id,Document.org_id.in_(eligible),Document.expiry<=date.today()+timedelta(days=30)).order_by(Document.expiry)).all()
+    sent=0;failed=0
+    for rule,d,c in rows:
+        days=(d.expiry-date.today()).days; stage=3 if days<0 else 2 if days<=7 else 1 if days<=30 else 0
+        if not stage or not c.email or (rule.last_expiry==d.expiry.isoformat() and rule.last_stage>=stage):continue
+        if sent+failed>=10:break
+        try: integrations.send_mail(c.email,'Renouvellement documentaire',f'Bonjour,\n\nMerci de nous transmettre une version à jour du document {d.kind} (échéance : {d.expiry}).\n\nCordialement.')
+        except Exception: failed+=1;continue
+        rule.last_expiry=d.expiry.isoformat();rule.last_stage=stage;session.add(Reminder(org_id=d.org_id,document_id=d.id));sent+=1
+    session.commit();return {'sent':sent,'failed':failed}
+
+
+@app.get('/api/storage')
+def storage(user:User=Depends(me),session:Session=Depends(db)):
+    count, used=session.execute(select(func.count(),func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id==user.org_id)).one()
+    return {'files':count,'bytes':used,'max_files':100,'max_bytes':50*1024*1024}
+
+@app.get('/api/workspace-export.json')
+def workspace_export(user:User=Depends(me),session:Session=Depends(db)):
+    from fastapi.responses import JSONResponse
+    org=session.get(Organization,user.org_id)
+    data={'organization':org.name,'email':user.email,'companies':companies(user,session),'documents':documents(user,session),'reminders':reminders(user,session),'exported_at':datetime.now(timezone.utc).isoformat()}
+    return JSONResponse(data,headers={'Content-Disposition':'attachment; filename="opera-workspace.json"'})
+
+
+@app.put('/api/documents/{document_id}/renew', dependencies=[Depends(csrf_guard)])
+def renew_pdf(document_id:int, request:Request, file:UploadFile=File(...), expiry:date=Form(...), reference:str=Form('',max_length=200), user:User=Depends(me), session:Session=Depends(db)):
+    rate_limit(request,'pdf',20)
+    d=session.scalar(select(Document).where(Document.id==document_id,Document.org_id==user.org_id))
+    if not d: raise HTTPException(404,'Document introuvable')
+    data=file.file.read(MAX_BYTES+1); checked_pdf(data,'validate')
+    if engine.dialect.name=='postgresql': session.execute(text('SELECT pg_advisory_xact_lock(726381)'))
+    a=session.scalar(select(Attachment).where(Attachment.document_id==d.id,Attachment.org_id==user.org_id))
+    old=len(a.data) if a else 0
+    used=session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id==user.org_id))
+    total=session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)))
+    count=session.scalar(select(func.count()).select_from(Attachment).where(Attachment.org_id==user.org_id))
+    if used-old+len(data)>50*1024*1024 or total-old+len(data)>400*1024*1024 or (not a and count>=100): raise HTTPException(409,'Quota de stockage pilote atteint')
+    filename=(file.filename or 'document.pdf').replace(chr(92),'/').split('/')[-1][:170]
+    if not filename.lower().endswith('.pdf'): filename+='.pdf'
+    if a: a.data=data; a.filename=filename
+    else: session.add(Attachment(document_id=d.id,org_id=user.org_id,filename=filename,data=data))
+    d.expiry=expiry; d.reference=reference
+    # Re-confirm permission after a renewal; old PDF is replaced, not archived.
+    session.execute(delete(AutoReminder).where(AutoReminder.document_id==d.id,AutoReminder.org_id==user.org_id))
+    log(session,user,'Document renouvelé · PDF remplacé');session.commit()
+    return {'ok':True}
+
+@app.get('/api/calendar.ics')
+def calendar_export(user:User=Depends(me),session:Session=Depends(db)):
+    def escape_ics(v):
+        return str(v).replace(chr(92),chr(92)*2).replace('\r\n','\n').replace('\r','\n').replace('\n',chr(92)+'n').replace(';',chr(92)+';').replace(',',chr(92)+',')
+    def fold(line):
+        parts=[]; part=''
+        for c in line:
+            if len((part+c).encode('utf-8'))>75: parts.append(part);part=' '
+            part+=c
+        parts.append(part);return '\r\n'.join(parts)
+    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//OPERA AI//Echeances//FR','CALSCALE:GREGORIAN']
+    for d in documents(user,session):
+        day=date.fromisoformat(d['expiry'])
+        if day==date.max: continue
+        lines.extend(['BEGIN:VEVENT',f'UID:opera-{user.org_id}-{d["id"]}@opera-local',f'DTSTAMP:{stamp}',f'DTSTART;VALUE=DATE:{day:%Y%m%d}',f'DTEND;VALUE=DATE:{day+timedelta(days=1):%Y%m%d}','SUMMARY:'+escape_ics(d['kind']+' - '+d['company']),'BEGIN:VALARM','ACTION:DISPLAY','TRIGGER:-P7D','DESCRIPTION:Renouvellement documentaire','END:VALARM','END:VEVENT'])
+    lines.append('END:VCALENDAR')
+    return Response('\r\n'.join(map(fold,lines))+'\r\n',media_type='text/calendar',headers={'Content-Disposition':'attachment; filename="opera-echeances.ics"'})
+
+
+@app.post('/api/demo/seed', dependencies=[Depends(csrf_guard)])
+def seed_demo(user:User=Depends(me),session:Session=Depends(db)):
+    """Explicit, tenant-local fictional onboarding, only in an empty workspace."""
+    if engine.dialect.name=='postgresql':
+        session.execute(text('SELECT pg_advisory_xact_lock(726383, :org)'),{'org':user.org_id})
+    if session.scalar(select(Company.id).where(Company.org_id==user.org_id).limit(1)):
+        raise HTTPException(409,'Le jeu de démonstration est réservé aux espaces vides.')
+    for name,kind,days in [('Atlas Démo','Assurance décennale',-5),('Horizon Démo','Attestation URSSAF',12),('Vertex Démo','Extrait Kbis',90)]:
+        c=Company(org_id=user.org_id,name=name,contact='Contact fictif',email='');session.add(c);session.flush()
+        session.add(Document(org_id=user.org_id,company_id=c.id,kind=kind,expiry=date.today()+timedelta(days=days),reference='DEMO',notes='Exemple fictif – aucun document réel.'))
+    log(session,user,'Exemples fictifs ajoutés');session.commit()
+    return {'ok':True}
