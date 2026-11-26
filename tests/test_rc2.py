@@ -12,7 +12,7 @@ def test_explicit_dates():
     assert analyze_text('Date de naissance : 01/01/2020')['expiry']==''
 
 def test_health():
-    assert TestClient(app).get('/health').json()['version']=='2.0-rc7'
+    assert TestClient(app).get('/health').json()['version']=='2.0-rc8'
 
 @pytest.mark.skipif(not shutil.which('tesseract') or not shutil.which('pdftoppm'),reason='OCR optional')
 def test_scanned_pdf():

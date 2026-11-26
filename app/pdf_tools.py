@@ -23,8 +23,16 @@ def validate_pdf(data):
         root = reader.trailer['/Root']
         names = root.get('/Names', {})
         if hasattr(names, 'get_object'): names = names.get_object()
-        if any(k in root for k in ('/OpenAction', '/AA', '/AcroForm')) or any(k in names for k in ('/EmbeddedFiles','/JavaScript')):
-            raise ValueError('PDF interactif non accepté.')
+        if '/EmbeddedFiles' in names or '/AF' in root:
+            raise ValueError('PDF avec pièce jointe intégrée non accepté. Exportez une copie PDF simple depuis votre lecteur (conservez l’original signé).')
+        if any(k in root for k in ('/OpenAction', '/AA', '/AcroForm')) or '/JavaScript' in names:
+            raise ValueError('PDF interactif non accepté : formulaire ou action active.')
+        for page in reader.pages:
+            if '/AA' in page: raise ValueError('Action active sur une page PDF non acceptée.')
+            for annotation in page.get('/Annots', []):
+                a=annotation.get_object()
+                if '/AA' in a or '/A' in a or a.get('/Subtype') in ('/FileAttachment','/RichMedia','/Screen','/Movie','/Sound','/Widget'):
+                    raise ValueError('Annotation interactive non acceptée.')
         return reader
     except ValueError:
         raise
@@ -67,4 +75,5 @@ def analyze_text(text, pages=1, method='text_rules'):
         except ValueError: pass
     reference_matches = re.findall(r'(?:num[eé]ro|n[°º]|r[eé]f[eé]rence)\s*(?:de\s+)?(?:contrat|police|attestation)\s*[:#]?[ \t]*([A-Z0-9][A-Z0-9./-]{3,49})', text, re.I)
     references=list(dict.fromkeys(reference_matches))
-    return {'reference':references[0] if len(references)==1 else '', 'kind':kind,'expiry':candidates[0] if len(candidates)==1 else '', 'candidate_dates':candidates,'text_found':bool(text.strip()),'pages':pages,'method':method,'warning':'Suggestions à vérifier sur le document original. Si aucune date fiable ne ressort, renseignez-la manuellement.'}
+    sirets=list(dict.fromkeys(re.sub(r'\s','',m) for m in re.findall(r'(?<!\d)\d{3}\s?\d{3}\s?\d{3}\s?\d{5}(?!\d)',text)))
+    return {'siret_candidates':sirets[:10], 'reference':references[0] if len(references)==1 else '', 'kind':kind,'expiry':candidates[0] if len(candidates)==1 else '', 'candidate_dates':candidates,'text_found':bool(text.strip()),'pages':pages,'method':method,'warning':'Suggestions à vérifier sur le document original. Si aucune date fiable ne ressort, renseignez-la manuellement.'}

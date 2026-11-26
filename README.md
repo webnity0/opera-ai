@@ -41,3 +41,6 @@ Les tests locaux utilisent SQLite temporaire et simulent Stripe/SMTP : aucune tr
 
 ## RC7 — Tarifs Sandbox
 Six tarifs intégrés avec validation côté serveur du montant, de la devise et de la périodicité. Sélection mensuelle/annuelle sur la page commerciale et dans les paramètres, Stripe Checkout hébergé, suivi du plan via webhook signé. Les droits par offre et l’essai de 14 jours ne sont pas encore appliqués : accès pilote gratuit. Aucun paiement réel. Tests Stripe simulés, à confirmer sur le Sandbox.
+
+## RC8 — candidat de test
+Assistant administratif local à règles (pas de modèle génératif), navigation latérale, historique dédié, import groupé par copier-coller Excel, suggestions SIRET, messages de refus PDF plus précis, essai et quotas côté serveur, protection contre les doubles souscriptions, simulateur d'économies. Paiements réels toujours désactivés. Les PDF avec pièces jointes restent refusés. Import multiple de PDF, chantiers, IA générative, relances automatiques en production et refonte complète restent à réaliser/valider. Les tests automatisés locaux ne remplacent pas les tests navigateur, PostgreSQL, Stripe, OCR et sécurité en production.
