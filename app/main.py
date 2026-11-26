@@ -103,7 +103,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 Base.metadata.create_all(engine)  # Beta only; production migrations should use Alembic.
-app = FastAPI(title='OPERA AI', version='2.0-rc9', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='OPERA AI', version='2.0-rc10', docs_url=None, redoc_url=None, openapi_url=None)
 
 _pdf_requests = BoundedSemaphore(2)
 
@@ -303,7 +303,7 @@ def delete_company(company_id: int, user: User = Depends(me), session: Session =
     if not c: raise HTTPException(404, 'Entreprise introuvable')
     if session.scalar(select(Document.id).where(Document.org_id == user.org_id, Document.company_id == company_id)):
         raise HTTPException(409, 'Supprimez d’abord les documents associés')
-    session.delete(c); log(session,user,'Entreprise supprimée'); session.commit()
+    session.execute(delete(rc10.ProjectCompany).where(rc10.ProjectCompany.company_id==c.id)); session.delete(c); log(session,user,'Entreprise supprimée'); session.commit()
     return {'ok': True}
 
 def status(expiry):
@@ -721,3 +721,5 @@ def assistant_query(payload:AssistantIn, user:User=Depends(me),session:Session=D
     safe=[{k:d[k] for k in ('id','company','kind','expiry','days','status')} for d in rows]
     count=session.scalar(select(func.count()).select_from(Company).where(Company.org_id==user.org_id))
     return answer(payload.question,safe,count)
+
+from . import rc10  # register optional RC10 routes
