@@ -1,3 +1,7 @@
+# RC9 — candidat de test
+
+Voir `RC9-LISEZ-MOI.md` pour les changements, le déploiement et les limites.
+
 # OPERA AI 2.0 RC6 — candidat de validation
 
 SaaS de suivi documentaire des sous-traitants BTP. Aucun nouveau service payant nécessaire pour le pilote. Ne pas facturer ni importer de documents réels avant validation de sécurité et de conformité.

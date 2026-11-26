@@ -103,7 +103,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 Base.metadata.create_all(engine)  # Beta only; production migrations should use Alembic.
-app = FastAPI(title='OPERA AI', version='2.0-rc8', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='OPERA AI', version='2.0-rc9', docs_url=None, redoc_url=None, openapi_url=None)
 
 _pdf_requests = BoundedSemaphore(2)
 
