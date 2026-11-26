@@ -1,9 +1,10 @@
+# Reference blueprint for a NEW test service only. Existing Render service: keep its current settings.
 services:
   - type: web
     name: opera-ai
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: SECRET_KEY
         generateValue: true

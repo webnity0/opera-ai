@@ -36,6 +36,8 @@ def projects(user=Depends(me),session=Depends(db)):
     return [project_row(p,session,user.org_id) for p in session.scalars(select(Project).where(Project.org_id==user.org_id).order_by(Project.name))]
 @app.post('/api/projects',dependencies=[Depends(csrf_guard),Depends(write_access)])
 def create_project(payload:ProjectIn,user=Depends(me),session=Depends(db)):
+    if access_info(user,session)[0] not in ('trial','professional','business'): raise HTTPException(403,'Chantiers : formule Professional ou Business')
+    if len(payload.name.strip())<2: raise HTTPException(422,'Nom du chantier requis')
     ids=set(payload.companies)
     if ids!=set(session.scalars(select(Company.id).where(Company.org_id==user.org_id,Company.id.in_(ids)))): raise HTTPException(404,'Entreprise introuvable')
     req=list(dict.fromkeys(r.strip() for r in payload.required if r.strip()))
@@ -68,3 +70,18 @@ def ai(payload:AIIn,request:Request,user=Depends(me),session=Depends(db)):
         if not isinstance(result,str) or not result.strip(): raise ValueError('empty')
     except Exception: raise HTTPException(502,'Assistant externe indisponible. Utilisez le mode local.')
     return {'message':result}
+
+@app.put('/api/projects/{pid}',dependencies=[Depends(csrf_guard),Depends(write_access)])
+def update_project(pid:int,payload:ProjectIn,user=Depends(me),session=Depends(db)):
+    p=session.scalar(select(Project).where(Project.id==pid,Project.org_id==user.org_id))
+    if not p: raise HTTPException(404,'Chantier introuvable')
+    if access_info(user,session)[0] not in ('trial','professional','business'): raise HTTPException(403,'Chantiers : formule Professional ou Business')
+    if len(payload.name.strip())<2: raise HTTPException(422,'Nom du chantier requis')
+    ids=set(payload.companies)
+    if ids!=set(session.scalars(select(Company.id).where(Company.org_id==user.org_id,Company.id.in_(ids)))): raise HTTPException(404,'Entreprise introuvable')
+    req=list(dict.fromkeys(r.strip() for r in payload.required if r.strip()))
+    if any(len(r)>100 for r in req) or len(payload.name.strip())<2: raise HTTPException(422,'Informations invalides')
+    p.name=payload.name.strip();p.address=payload.address.strip();p.required=json.dumps(req,ensure_ascii=False)
+    session.execute(delete(ProjectCompany).where(ProjectCompany.project_id==pid))
+    for cid in ids: session.add(ProjectCompany(project_id=pid,company_id=cid))
+    log(session,user,'Chantier modifié');session.commit();return {'id':p.id}

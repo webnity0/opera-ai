@@ -1,50 +1,28 @@
-# RC9 — candidat de test
+# OPERA AI 2.0 — Ultimate | Candidat de validation
 
-Voir `RC9-LISEZ-MOI.md` pour les changements, le déploiement et les limites.
+OPERA AI est un outil de pilotage documentaire pour les entreprises du bâtiment et leurs sous-traitants. Cette archive reprend la RC10, ajoute des fonctionnalités métier et corrige des points de présentation. Elle reste en mode pilote : **données fictives uniquement, aucun paiement réel.** Voir `DEPLOIEMENT.md` pour le parcours de validation.
 
-# OPERA AI 2.0 RC6 — candidat de validation
+## Fonctionnalités
+- Tableau de bord avec graphique circulaire et actions prioritaires ; navigation latérale, calendrier, historique, recherche, exports CSV et calendrier.
+- Gestion d'entreprises et import CSV, copier-coller ou XLSX (100 lignes, 3 colonnes, aperçu à confirmer, formules refusées). Gestion de chantiers modifiables, association des entreprises et exigences documentaires. Le contrôle par chantier porte sur les types et dates renseignés, pas sur la validité juridique.
+- PDF jusqu'à 10 Mio et 30 pages, analyse locale par règles et OCR français/anglais si installé, suggestions à confirmer, import groupé jusqu'à 5 fichiers. Les PDF actifs, avec formulaires ou pièces jointes restent refusés pour des raisons de sécurité ; ne pas supprimer une signature ou modifier un original officiel pour le faire accepter.
+- Collecte documentaire : lien secret à usage unique valable 7 jours, associé à un document existant ; le destinataire ne voit aucune donnée du compte. Le PDF reçu ne remplace l'ancien qu'après téléchargement, vérification et validation de l'utilisateur connecté. Les liens peuvent être révoqués ; les fichiers en attente comptent dans le quota de stockage.
+- Rapports PDF de suivi documentaire et des chantiers, avec avertissement de non-certification. Modèles de relance personnalisables, brouillons et historique, relances programmées sous conditions (SMTP et ordonnanceur externe).
+- Assistant local déterministe, y compris suivi des chantiers ; option générative externe avec autorisation explicite, à configurer. Aucun PDF brut, coordonnées de contact, référence ni note n'est envoyé à l'IA externe par le code ; les noms d'entreprises, types, dates, états et la question sont transmis. Ne pas saisir d'information sensible. Ce n'est pas une vérification juridique.
+- Six prix Stripe Sandbox (39, 69, 109 euros/mois ; 390, 690, 1090 euros/an). Essai local de 14 jours. Quotas de fiches par plan ; chantiers, collecte, IA externe et relances automatiques réservés aux essais éligibles, Professional et Business. Tous les plans ont encore une limite pilote commune de 100 PDF et 50 Mio par organisation et 400 Mio de pièces jointes globalement. Paiement réel interdit par le code.
 
-SaaS de suivi documentaire des sous-traitants BTP. Aucun nouveau service payant nécessaire pour le pilote. Ne pas facturer ni importer de documents réels avant validation de sécurité et de conformité.
-
-## Inclus
-- Landing page, espace client responsive, tableau de bord, entreprises, documents, recherche, export CSV, historique, paramètres, changement du mot de passe, sessions révocables.
-- PDF de 10 Mio et 30 pages maximum, quotas de stockage pilote, contrôle d'accès par organisation, extraction locale par règles, suggestions de catégorie/date/référence à confirmer. OCR français/anglais facultatif, deux premières pages des scans sans texte ; Dockerfile inclus. Aucun LLM ou appel IA externe.
-- Relances manuelles et relances programmées opt-in (SMTP SSL et tâche externe requis). Comptes autorisés explicitement ; aucun envoi automatique par défaut. Les répétitions sont limitées à un envoi par étape d'échéance dans le fonctionnement normal, sans garantie exactement-une-fois en cas de panne après envoi.
-- Stripe Checkout et portail en mode TEST, suivi d'abonnement via webhook signé et état vérifié auprès de Stripe. Paiements réels bloqués. Le statut d'abonnement ne restreint pas encore les droits d'accès au pilote.
-
-## Lancer localement
+## Démarrage local
 ```
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-COOKIE_SECURE=0 uvicorn app.main:app --reload
+COOKIE_SECURE=0 uvicorn app.main:app --host 127.0.0.1 --port 8000
 python -m pytest -q
 ```
+Sous Render, conserver Docker et PostgreSQL ; voir le guide. `examples/OPERA-DEMO-seulement.pdf` et `examples/entreprises-demo.csv` sont des données synthétiques. Ne jamais utiliser un document réel pendant le pilote.
 
-## Validation et limites
-Les tests locaux utilisent SQLite temporaire et simulent Stripe/SMTP : aucune transaction ou livraison réelle. OCR testé sur un scan synthétique. Chromium bloque l'accès local (ERR_BLOCKED_BY_ADMINISTRATOR) ; rendu navigateur et parcours complet non validés. PostgreSQL Neon, SMTP, Stripe test et Docker n'ont pas été testés en production. Analyse PDF dans un processus séparé avec limites de ressources, mais sans bac à sable système complet, limites de débit par processus, migrations non versionnées, pas de récupération ni de vérification d'e-mail. Avant commercialisation : audit sécurité indépendant, isolation système complète du traitement PDF, sauvegardes/restauration, surveillance, RGPD, hébergement et contrats, vérification des parcours sur mobile et ordinateur, paiement réel et droits associés, politique d'abonnement. Les offres gratuites peuvent dormir, atteindre leurs quotas ou changer. Voir DEPLOIEMENT.md.
+## Résultats vérifiés
+32 tests automatisés réussis sur SQLite temporaire, dont l'OCR synthétique, les six tarifs Stripe simulés, la collecte à usage unique, l'isolation entre organisations, l'import Excel, les rapports PDF et les modèles de relance. Deux avertissements de dépréciation TestClient dans les anciens tests de cookies. Syntaxe des deux scripts JavaScript et unicité des identifiants HTML vérifiées. Le PDF d'exemple a été rendu et contrôlé. Le navigateur de test bloque les connexions locales ; aucun parcours navigateur complet ni test Render/Neon réel effectué. Stripe/SMTP et appel génératif simulés ; aucune livraison ni transaction réelle.
 
-## RC4 — améliorations validées localement
-- Le traitement PDF est exécuté dans un processus enfant avec environnement filtré, limite de durée, concurrence limitée à un traitement par processus web, et limites CPU/mémoire sur Linux. Ce n'est pas un bac à sable de sécurité ; le processus conserve les permissions système du serveur. Vérifier la consommation réelle sur Render Free.
-- Paramètres : affichage du quota de stockage par organisation, export JSON des métadonnées (sans fichiers PDF ni secrets). Les PDF restent téléchargeables séparément ; cet export ne remplace pas une sauvegarde complète.
-- Le traitement des relances vérifie à nouveau la liste des comptes autorisés à chaque exécution et ne limite plus la sélection aux 500 premières échéances.
-- 15 tests locaux réussis sur SQLite. Deux avertissements de dépréciation dans les tests de cookies. Stripe et SMTP simulés. La syntaxe JavaScript a été contrôlée avec Node. Aucun nouveau service externe obligatoire.
-
-## RC5 — parcours de renouvellement
-- Remplacement explicite du PDF et de son échéance sur une fiche existante, sans doublon ni consommation supplémentaire de quota pour l’ancien fichier. Le PDF précédent est supprimé ; le télécharger avant si nécessaire.
-- Export iCalendar (.ics) des échéances, avec alarme à J-7 (selon prise en charge par le calendrier). Import ponctuel, pas de synchronisation.
-- Désactivation des relances automatiques au renouvellement et au changement de destinataire ou d’entreprise ; confirmation requise pour réactiver.
-- Blocage renforcé des appels Stripe avec une clé réelle, validation d’inscription et amélioration du focus clavier.
-- 17 tests locaux réussis, syntaxe Python et JavaScript vérifiée. Toujours en pilote : aucune validation de production, aucun paiement réel ni audit indépendant.
-
-## RC6 — validation avant mise en ligne
-- Démonstration sur demande dans un espace vide : trois entreprises et trois échéances fictives, sans adresse de destinataire. Aucun document réel ni envoi automatique.
-- Limitation de débit ajoutée à l'import PDF et contrôles de concurrence supplémentaires ; désactivation des relances si catégorie, entreprise ou échéance changent ; en-têtes navigateur renforcés.
-- 19 tests locaux réussis sur SQLite, vérifications syntaxiques Python et JavaScript. Deux avertissements de dépréciation des tests de cookies. Pas de validation nouvelle en navigateur ni sur PostgreSQL/Render.
-- Version destinée à un pilote public de démonstration, pas à la facturation ou au traitement de données clients réelles.
-
-## RC7 — Tarifs Sandbox
-Six tarifs intégrés avec validation côté serveur du montant, de la devise et de la périodicité. Sélection mensuelle/annuelle sur la page commerciale et dans les paramètres, Stripe Checkout hébergé, suivi du plan via webhook signé. Les droits par offre et l’essai de 14 jours ne sont pas encore appliqués : accès pilote gratuit. Aucun paiement réel. Tests Stripe simulés, à confirmer sur le Sandbox.
-
-## RC8 — candidat de test
-Assistant administratif local à règles (pas de modèle génératif), navigation latérale, historique dédié, import groupé par copier-coller Excel, suggestions SIRET, messages de refus PDF plus précis, essai et quotas côté serveur, protection contre les doubles souscriptions, simulateur d'économies. Paiements réels toujours désactivés. Les PDF avec pièces jointes restent refusés. Import multiple de PDF, chantiers, IA générative, relances automatiques en production et refonte complète restent à réaliser/valider. Les tests automatisés locaux ne remplacent pas les tests navigateur, PostgreSQL, Stripe, OCR et sécurité en production.
+## Ce qui bloque la commercialisation
+Revue de sécurité et traitement PDF (le processus séparé n'est pas un bac à sable système complet), migrations versionnées et sauvegarde/restauration PostgreSQL, vérification des comptes e-mail et récupération de mot de passe, tests navigateur/mobile et charge, surveillance, validation RGPD et des contrats, activation des services externes, configuration et tests Stripe live dans un environnement distinct, immatriculation, facturation et fiscalité. Les offres d'hébergement gratuites peuvent dormir. Les relances automatiques ne garantissent pas un envoi exactement une fois en cas de panne après SMTP. Aucune note de 9/10, certification, garantie de sécurité ou prévision de ventes n'est établie par ces tests.

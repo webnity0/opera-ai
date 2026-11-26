@@ -26,12 +26,13 @@ def checked_price(plan):
 
 
 
+# Reuse TLS connections between calls; credentials are passed per request.
+_stripe_client = httpx.Client(timeout=httpx.Timeout(15,connect=5),limits=httpx.Limits(max_connections=10,max_keepalive_connections=5))
 def stripe_request(path, data=None):
-    key=os.environ['STRIPE_SECRET_KEY']
-    with httpx.Client(timeout=15, auth=(key,'')) as client:
-        response=client.post('https://api.stripe.com/v1/'+path,data=data) if data is not None else client.get('https://api.stripe.com/v1/'+path)
-        response.raise_for_status()
-        return response.json()
+    auth=(os.environ['STRIPE_SECRET_KEY'],'')
+    response=_stripe_client.post('https://api.stripe.com/v1/'+path,data=data,auth=auth) if data is not None else _stripe_client.get('https://api.stripe.com/v1/'+path,auth=auth)
+    response.raise_for_status()
+    return response.json()
 
 
 def valid_stripe_signature(body, header, secret, now=None):

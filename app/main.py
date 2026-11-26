@@ -103,7 +103,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 Base.metadata.create_all(engine)  # Beta only; production migrations should use Alembic.
-app = FastAPI(title='OPERA AI', version='2.0-rc10', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='OPERA AI', version='2.0-ultimate', docs_url=None, redoc_url=None, openapi_url=None)
 
 _pdf_requests = BoundedSemaphore(2)
 
@@ -113,7 +113,7 @@ async def security_headers(request: Request, call_next):
         length = request.headers.get('content-length')
         if length is not None and not length.isdigit():
             return Response(status_code=411)
-        limit = MAX_BYTES + 65536 if (request.url.path in ('/api/pdf/analyze','/api/documents/upload') or (request.url.path.startswith('/api/documents/') and request.url.path.endswith('/renew'))) else 65536
+        limit = MAX_BYTES + 65536 if (request.url.path in ('/api/pdf/analyze','/api/documents/upload','/api/public/deposit') or (request.url.path.startswith('/api/documents/') and request.url.path.endswith('/renew'))) else (576*1024 if request.url.path=='/api/companies/xlsx-preview' else 65536)
         if length is not None and int(length) > limit: return Response(status_code=413)
         # Enforce actual streamed body length too, before multipart parsing.
         chunks = bytearray()
@@ -128,7 +128,7 @@ async def security_headers(request: Request, call_next):
     response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
     if os.getenv('RENDER'): response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'no-cache'
+    response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') or request.url.path=='/depot' else 'no-cache'
     return response
 
 def db():
@@ -241,7 +241,7 @@ def health():
         with engine.connect() as connection: connection.execute(text('SELECT 1'))
     except Exception:
         raise HTTPException(503, 'Base indisponible')
-    return {'status': 'ok', 'version': '2.0-rc8'}
+    return {'status': 'ok', 'version': app.version}
 
 @app.post('/api/register', dependencies=[Depends(csrf_guard)])
 def register(payload: RegisterIn, response: Response, request: Request, session: Session = Depends(db)):
@@ -331,22 +331,27 @@ def add_doc(payload: DocIn, user: User = Depends(me), session: Session = Depends
 
 @app.put('/api/documents/{document_id}', dependencies=[Depends(csrf_guard),Depends(write_access)])
 def edit_doc(document_id: int, payload: DocIn, user: User = Depends(me), session: Session = Depends(db)):
+    release.lock_storage(session)
     d = session.scalar(select(Document).where(Document.id == document_id, Document.org_id == user.org_id))
     c = session.scalar(select(Company).where(Company.id == payload.company_id, Company.org_id == user.org_id))
     if not d or not c: raise HTTPException(404, 'Document ou entreprise introuvable')
     if d.company_id != payload.company_id or d.expiry != payload.expiry or d.kind != payload.kind:
         session.execute(delete(AutoReminder).where(AutoReminder.document_id == d.id, AutoReminder.org_id == user.org_id))
+    if d.company_id != payload.company_id or d.expiry != payload.expiry or d.kind != payload.kind:
+        session.execute(delete(release.Deposit).where(release.Deposit.document_id==d.id,release.Deposit.org_id==user.org_id))
     for key,value in payload.model_dump().items(): setattr(d,key,value)
     log(session,user,'Document modifié'); session.commit()
     return {'ok': True}
 
 @app.delete('/api/documents/{document_id}', dependencies=[Depends(csrf_guard)])
 def delete_doc(document_id: int, user: User = Depends(me), session: Session = Depends(db)):
+    release.lock_storage(session)
     d = session.scalar(select(Document).where(Document.id == document_id, Document.org_id == user.org_id))
     if not d: raise HTTPException(404, 'Document introuvable')
     session.execute(delete(Attachment).where(Attachment.document_id == d.id, Attachment.org_id == user.org_id))
     session.execute(delete(Reminder).where(Reminder.document_id == d.id, Reminder.org_id == user.org_id))
     session.execute(delete(AutoReminder).where(AutoReminder.document_id == d.id, AutoReminder.org_id == user.org_id))
+    session.execute(delete(release.Deposit).where(release.Deposit.document_id==d.id,release.Deposit.org_id==user.org_id))
     session.delete(d); log(session,user,'Document supprimé'); session.commit()
     return {'ok': True}
 
@@ -396,7 +401,7 @@ def upload_document(request: Request, file: UploadFile = File(...), company_id: 
         session.execute(text('SELECT pg_advisory_xact_lock(726381)'))
     used = session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id == user.org_id))
     total = session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)))
-    if used + len(data) > 50*1024*1024 or total + len(data) > 400*1024*1024:
+    if used + release.pending_storage(session,user.org_id) + len(data) > 50*1024*1024 or total + release.pending_storage(session) + len(data) > 400*1024*1024:
         raise HTTPException(409, 'Quota de stockage pilote atteint')
     count = session.scalar(select(func.count()).select_from(Attachment).where(Attachment.org_id == user.org_id))
     if count >= 100: raise HTTPException(409, 'Limite pilote : 100 PDF par organisation')
@@ -508,7 +513,7 @@ def capabilities(user:User=Depends(me),session:Session=Depends(db)):
     plan=session.get(BillingPlan,user.org_id)
     details=session.get(BillingDetails,user.org_id)
     tier,trial_until=access_info(user,session)
-    return {'tier':tier,'company_limit':LIMITS[tier][0],'document_limit':LIMITS[tier][1],'cancel_pending':bool(details and details.cancel_pending),'ends_at':details.ends_at if details else '', 'trial_until':trial_until or '', 'plan':plan.plan if plan and b and b.state in ('active','trialing') else '', 'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
+    return {'generative':bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPERA_AI_MODEL')) and tier in ('trial','professional','business'),'tier':tier,'company_limit':LIMITS[tier][0],'document_limit':LIMITS[tier][1],'cancel_pending':bool(details and details.cancel_pending),'ends_at':details.ends_at if details else '', 'trial_until':trial_until or '', 'plan':plan.plan if plan and b and b.state in ('active','trialing') else '', 'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
 
 @app.post('/api/billing/checkout',dependencies=[Depends(csrf_guard)])
 def checkout(request:Request,plan:str='essential_monthly',user:User=Depends(me),session:Session=Depends(db)):
@@ -616,7 +621,9 @@ def run_reminders(x_job_secret:str=Header(default=''),session:Session=Depends(db
         days=(d.expiry-today_fr()).days; stage=3 if days<0 else 2 if days<=7 else 1 if days<=30 else 0
         if not stage or not c.email or (rule.last_expiry==d.expiry.isoformat() and rule.last_stage>=stage):continue
         if sent+failed>=10:break
-        try: integrations.send_mail(c.email,'Renouvellement documentaire',f'Bonjour,\n\nMerci de nous transmettre une version à jour du document {d.kind} (échéance : {d.expiry}).\n\nCordialement.')
+        try:
+            draft=release.reminder_draft(session,d.org_id,d,c)
+            integrations.send_mail(c.email,draft['subject'],draft['body'])
         except Exception: failed+=1;continue
         rule.last_expiry=d.expiry.isoformat();rule.last_stage=stage;session.add(Reminder(org_id=d.org_id,document_id=d.id));sent+=1
     session.commit();return {'sent':sent,'failed':failed}
@@ -625,7 +632,7 @@ def run_reminders(x_job_secret:str=Header(default=''),session:Session=Depends(db
 @app.get('/api/storage')
 def storage(user:User=Depends(me),session:Session=Depends(db)):
     count, used=session.execute(select(func.count(),func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id==user.org_id)).one()
-    return {'files':count,'bytes':used,'max_files':100,'max_bytes':50*1024*1024}
+    return {'files':count,'bytes':used+release.pending_storage(session,user.org_id),'max_files':100,'max_bytes':50*1024*1024}
 
 @app.get('/api/workspace-export.json')
 def workspace_export(user:User=Depends(me),session:Session=Depends(db)):
@@ -647,11 +654,12 @@ def renew_pdf(document_id:int, request:Request, file:UploadFile=File(...), expir
     used=session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)).where(Attachment.org_id==user.org_id))
     total=session.scalar(select(func.coalesce(func.sum(func.length(Attachment.data)),0)))
     count=session.scalar(select(func.count()).select_from(Attachment).where(Attachment.org_id==user.org_id))
-    if used-old+len(data)>50*1024*1024 or total-old+len(data)>400*1024*1024 or (not a and count>=100): raise HTTPException(409,'Quota de stockage pilote atteint')
+    if used+release.pending_storage(session,user.org_id)-old+len(data)>50*1024*1024 or total+release.pending_storage(session)-old+len(data)>400*1024*1024 or (not a and count>=100): raise HTTPException(409,'Quota de stockage pilote atteint')
     filename=(file.filename or 'document.pdf').replace(chr(92),'/').split('/')[-1][:170]
     if not filename.lower().endswith('.pdf'): filename+='.pdf'
     if a: a.data=data; a.filename=filename
     else: session.add(Attachment(document_id=d.id,org_id=user.org_id,filename=filename,data=data))
+    session.execute(delete(release.Deposit).where(release.Deposit.document_id==d.id,release.Deposit.org_id==user.org_id))
     d.expiry=expiry; d.reference=reference
     # Re-confirm permission after a renewal; old PDF is replaced, not archived.
     session.execute(delete(AutoReminder).where(AutoReminder.document_id==d.id,AutoReminder.org_id==user.org_id))
@@ -717,9 +725,18 @@ class AssistantIn(BaseModel):
 @app.post('/api/assistant', dependencies=[Depends(csrf_guard),Depends(write_access)])
 def assistant_query(payload:AssistantIn, user:User=Depends(me),session:Session=Depends(db)):
     from .assistant import answer
+    import unicodedata
+    q=''.join(c for c in unicodedata.normalize('NFKD',payload.question.lower()) if not unicodedata.combining(c))
+    if any(k in q for k in ('chantier','dossier incomplet','documents manquants','pieces manquantes')):
+        projects=[rc10.project_row(p,session,user.org_id) for p in session.scalars(select(rc10.Project).where(rc10.Project.org_id==user.org_id))]
+        gaps=[f"{p['name']} — {c['name']} : {', '.join(c['missing'])}" for p in projects for c in p['companies'] if c['missing']]
+        message=f"{len(projects)} chantier(s) suivi(s). {len(gaps)} dossier(s) comportent des pièces manquantes ou expirées selon vos exigences."
+        if gaps:message+='\n'+'\n'.join(gaps[:25])
+        return {'title':'Suivi des chantiers','message':message,'items':[],'total':len(gaps)}
     rows=documents(user,session)
     safe=[{k:d[k] for k in ('id','company','kind','expiry','days','status')} for d in rows]
     count=session.scalar(select(func.count()).select_from(Company).where(Company.org_id==user.org_id))
     return answer(payload.question,safe,count)
 
 from . import rc10  # register optional RC10 routes
+from . import release
