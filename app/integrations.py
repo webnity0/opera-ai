@@ -45,11 +45,34 @@ def valid_stripe_signature(body, header, secret, now=None):
     except (ValueError,StopIteration): return False
 
 
+def ai_config():
+    # Prefer Groq explicitly when its key is present. Never silently switch providers.
+    if os.getenv('GROQ_API_KEY'):
+        return ('https://api.groq.com/openai/v1/chat/completions', os.environ['GROQ_API_KEY'], os.getenv('GROQ_MODEL','openai/gpt-oss-20b'))
+    if os.getenv('OPENAI_API_KEY') and os.getenv('OPERA_AI_MODEL'):
+        return ('https://api.openai.com/v1/chat/completions',os.environ['OPENAI_API_KEY'],os.environ['OPERA_AI_MODEL'])
+    return None
+
+
+def brevo_ready():
+    return bool(os.getenv('BREVO_API_KEY') and os.getenv('BREVO_SENDER_EMAIL'))
+
+
 def mail_ready():
+    if os.getenv('BREVO_API_KEY'):
+        return brevo_ready() and len(os.getenv('REMINDER_JOB_SECRET',''))>=32
     return all(os.getenv(k) for k in ('SMTP_HOST','SMTP_USER','SMTP_PASSWORD','SMTP_FROM','REMINDER_JOB_SECRET'))
 
 
 def send_mail(recipient, subject, body):
+    if os.getenv('BREVO_API_KEY'):
+        if not brevo_ready(): raise ValueError('Brevo not configured')
+        sender=os.environ['BREVO_SENDER_EMAIL'].strip()
+        # Pilot only: never send to an actual subcontractor or an arbitrary address.
+        if recipient.strip().casefold()!=sender.casefold(): raise ValueError('Pilot recipient not allowed')
+        r=httpx.post('https://api.brevo.com/v3/smtp/email',headers={'api-key':os.environ['BREVO_API_KEY'],'accept':'application/json'},json={'sender':{'name':'OPERA AI','email':sender},'to':[{'email':sender}],'subject':subject,'textContent':body},timeout=15)
+        r.raise_for_status()
+        return
     msg=EmailMessage(); msg['From']=os.environ['SMTP_FROM']; msg['To']=recipient; msg['Subject']=subject; msg.set_content(body)
     with smtplib.SMTP_SSL(os.environ['SMTP_HOST'],int(os.getenv('SMTP_PORT','465')),timeout=15,context=ssl.create_default_context()) as smtp:
         smtp.login(os.environ['SMTP_USER'],os.environ['SMTP_PASSWORD']); smtp.send_message(msg)

@@ -4,7 +4,7 @@ from datetime import datetime, date
 from fastapi import Depends, HTTPException, UploadFile, File, Request, Response
 from sqlalchemy import select
 from openpyxl import load_workbook
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from xml.sax.saxutils import escape
@@ -42,21 +42,58 @@ def report(user=Depends(me),session=Depends(db)):
     rows=documents(user,session)
     org=session.get(Organization,user.org_id)
     projects=[project_row(p,session,user.org_id) for p in session.scalars(select(Project).where(Project.org_id==user.org_id).order_by(Project.name))]
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.pagesizes import A4
+    from reportlab.graphics.shapes import Drawing, Circle, Wedge, String
+    ink=colors.HexColor('#15302E'); mint=colors.HexColor('#429D80'); muted=colors.HexColor('#526560')
+    palette={'valid':mint,'soon':colors.HexColor('#94630C'),'expired':colors.HexColor('#B63E50'),'missing':colors.HexColor('#B63E50')}
+    labels={'valid':'Hors alerte','expired':'Expiré','soon':'À renouveler','missing':'Manquant'}
     styles=getSampleStyleSheet(); buf=io.BytesIO()
-    def p(s,style='BodyText'): return Paragraph(escape(str(s)),styles[style])
-    story=[p('OPERA AI | Rapport administratif','Title'),p(org.name),p('Situation au '+today_fr().strftime('%d/%m/%Y')),Spacer(1,12),p('Suivi documentaire','Heading2'),p(f'{len(rows)} documents · {sum(d["status"]=="expired" for d in rows)} expirés · {sum(d["status"]=="soon" for d in rows)} à renouveler'),Spacer(1,10)]
-    table=[[p('Entreprise'),p('Document'),p('Échéance'),p('Statut')]]
-    labels={'valid':'Hors alerte','expired':'Expiré','soon':'À renouveler'}
-    for d in rows: table.append([p(d['company']),p(d['kind']),p(d['expiry'][8:10]+'/'+d['expiry'][5:7]+'/'+d['expiry'][:4]),p(labels[d['status']])])
-    t=Table(table,colWidths=[135,150,80,90],repeatRows=1,hAlign='LEFT');t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#C8E9DE')),('VALIGN',(0,0),(-1,-1),'TOP'),('LINEBELOW',(0,0),(-1,-1),.25,colors.HexColor('#CDD8D5')),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F7F5')])]))
-    story.extend([t,Spacer(1,16),p('Chantiers et pièces à contrôler','Heading2')])
+    styles.add(ParagraphStyle(name='Cell',fontName='Helvetica',fontSize=9,leading=13,textColor=ink,splitLongWords=True))
+    styles.add(ParagraphStyle(name='WhiteCell',parent=styles['Cell'],textColor=colors.white,fontName='Helvetica-Bold'))
+    styles.add(ParagraphStyle(name='Metric',fontName='Helvetica-Bold',fontSize=24,leading=30,textColor=ink))
+    styles['Heading2'].textColor=ink;styles['Heading2'].spaceBefore=11;styles['Heading2'].spaceAfter=6
+    styles['Heading3'].textColor=ink
+    def p(s,style='Cell'): return Paragraph(escape(str(s)),styles[style])
+    def status(s): return Paragraph('<font color="'+palette[s].hexval()+'"><b>'+labels[s]+'</b></font>',styles['Cell'])
+    def table(headers,items,widths):
+        t=Table([[p(x,'WhiteCell') for x in headers]]+items,colWidths=widths,repeatRows=1,hAlign='LEFT',splitByRow=1)
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),ink),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#DCE7E3')),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F7F5')])]))
+        return t
+    counts={k:sum(d['status']==k for d in rows) for k in ('valid','soon','expired')}
+    pieces=[x for project in projects for c in project['companies'] for x in c['pieces']]
+    missing=sum(x['status']=='missing' for x in pieces)
+    metrics=Table([[p(str(n),'Metric') for n in (len(rows),counts['expired'],counts['soon'],missing)],[p(x) for x in ('Documents suivis','Expirés','À renouveler','Pièces manquantes*')]],colWidths=[127]*4)
+    metrics.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#EAF4F0')),('TOPPADDING',(0,0),(-1,0),12),('BOTTOMPADDING',(0,1),(-1,1),12),('LEFTPADDING',(0,0),(-1,-1),12)]))
+    story=[p(org.name,'Heading2'),p('Situation au '+today_fr().strftime('%d/%m/%Y')),Spacer(1,12),metrics,p('* Par exigence et entreprise associée à un chantier ; une pièce peut être comptée plusieurs fois.'),Spacer(1,10)]
+    chart=Drawing(508,112); chart.add(Circle(56,56,48,fillColor=colors.HexColor('#DFE8E5'),strokeColor=None)); angle=90
+    if rows:
+        for k in ('valid','soon','expired'):
+            sweep=360*counts[k]/len(rows)
+            if sweep: chart.add(Wedge(56,56,48,angle,angle+sweep,fillColor=palette[k],strokeColor=None));angle+=sweep
+    chart.add(Circle(56,56,32,fillColor=colors.white,strokeColor=None));chart.add(String(56,56,str(round(100*counts['valid']/len(rows)))+'%' if rows else '—',fontName='Helvetica-Bold',fontSize=16,textAnchor='middle',fillColor=ink));chart.add(String(56,42,'Hors alerte',fontSize=8,textAnchor='middle',fillColor=muted))
+    for i,k in enumerate(('valid','soon','expired')):
+        chart.add(Circle(135,82-i*23,4,fillColor=palette[k],strokeColor=None));chart.add(String(147,79-i*23,f'{counts[k]} · {labels[k]}',fontSize=11,fillColor=ink))
+    story.extend([chart,p('Actions prioritaires','Heading2')])
+    def fmt(d):return d[8:10]+'/'+d[5:7]+'/'+d[:4] if d else '—'
+    priorities=sorted((d for d in rows if d['status']!='valid'),key=lambda d:(d['status']!='expired',d['expiry']))
+    if priorities: story.append(table(['Entreprise / document','Échéance','Statut','Action suggérée'],[[p(d['company']+' — '+d['kind']),p(fmt(d['expiry'])),status(d['status']),p('Demander une pièce à jour' if d['status']=='expired' else 'Préparer le renouvellement')] for d in priorities],[190,78,100,140]))
+    else: story.append(p('Aucune échéance en alerte selon les dates enregistrées.'))
+    story.append(p('Détail documentaire','Heading2'))
+    if rows:story.append(table(['Entreprise','Document','Échéance','Statut'],[[p(d['company']),p(d['kind']),p(fmt(d['expiry'])),status(d['status'])] for d in rows],[135,180,83,110]))
+    else:story.append(p('Aucun document enregistré.'))
+    if projects and rows: story.append(PageBreak())
+    story.append(p('Chantiers et pièces à contrôler','Heading2'))
     for project in projects:
         story.append(p(project['name'],'Heading3'))
-        for c in project['companies']: story.append(p(c['name']+' : '+(', '.join(c['missing']) if c['missing'] else 'Aucune pièce signalée manquante selon les exigences renseignées')))
-    story.extend([Spacer(1,16),p('Rapport de suivi interne, non constitutif d’une certification de conformité. Vérifier les originaux et les exigences applicables.')])
+        data=[[p(c['name']),p(x['kind']),p(fmt(x['expiry'])),status(x['status'])] for c in project['companies'] for x in c['pieces']]
+        if data:story.append(table(['Entreprise','Pièce requise','Échéance','Statut'],data,[135,180,83,110]))
+        else:story.append(p('Aucune exigence ou entreprise associée.'))
+    if not projects:story.append(p('Aucun chantier enregistré.'))
+    story.extend([Spacer(1,14),p('Rapport de suivi interne, non constitutif d’une certification de conformité. Vérifier les originaux, leur authenticité et les exigences applicables.')])
     def footer(canvas,doc):
-        canvas.setFont('Helvetica',9);canvas.setFillColor(colors.HexColor('#53645F'));canvas.drawString(72,35,'OPERA AI — confidentiel');canvas.drawRightString(523,35,f'Page {doc.page}')
-    SimpleDocTemplate(buf).build(story,onFirstPage=footer,onLaterPages=footer)
+        w,h=A4;canvas.setFillColor(ink);canvas.rect(0,h-82,w,82,fill=1,stroke=0);canvas.setFont('Helvetica-Bold',22);canvas.setFillColor(colors.white);canvas.drawString(43,h-32,'OPERA');canvas.setFillColor(colors.HexColor('#85EFBF'));canvas.drawString(124,h-32,'AI');canvas.setFont('Helvetica',11);canvas.setFillColor(colors.white);canvas.drawString(44,h-57,'Rapport de suivi documentaire');canvas.setStrokeColor(colors.HexColor('#DCE7E3'));canvas.line(43,46,w-43,46);canvas.setFont('Helvetica',9);canvas.setFillColor(muted);canvas.drawString(43,30,'OPERA AI — confidentiel');canvas.drawRightString(w-43,30,f'Page {doc.page}')
+    SimpleDocTemplate(buf,pagesize=A4,leftMargin=43,rightMargin=43,topMargin=96,bottomMargin=58).build(story,onFirstPage=footer,onLaterPages=footer)
     return Response(buf.getvalue(),media_type='application/pdf',headers={'Content-Disposition':'attachment; filename="opera-rapport.pdf"','Cache-Control':'no-store'})
 
 # Single-use document collection link. The recipient cannot read any workspace data.

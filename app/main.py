@@ -513,7 +513,7 @@ def capabilities(user:User=Depends(me),session:Session=Depends(db)):
     plan=session.get(BillingPlan,user.org_id)
     details=session.get(BillingDetails,user.org_id)
     tier,trial_until=access_info(user,session)
-    return {'generative':bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPERA_AI_MODEL')) and tier in ('trial','professional','business'),'tier':tier,'company_limit':LIMITS[tier][0],'document_limit':LIMITS[tier][1],'cancel_pending':bool(details and details.cancel_pending),'ends_at':details.ends_at if details else '', 'trial_until':trial_until or '', 'plan':plan.plan if plan and b and b.state in ('active','trialing') else '', 'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
+    return {'generative':bool(integrations.ai_config()) and tier in ('trial','professional','business'),'tier':tier,'company_limit':LIMITS[tier][0],'document_limit':LIMITS[tier][1],'cancel_pending':bool(details and details.cancel_pending),'ends_at':details.ends_at if details else '', 'trial_until':trial_until or '', 'plan':plan.plan if plan and b and b.state in ('active','trialing') else '', 'ocr':available(),'email':integrations.mail_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'email_test':integrations.brevo_ready() and user.email in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',')},'billing':integrations.billing_ready(),'subscription':b.state if b else 'none','billing_test':True}
 
 @app.post('/api/billing/checkout',dependencies=[Depends(csrf_guard)])
 def checkout(request:Request,plan:str='essential_monthly',user:User=Depends(me),session:Session=Depends(db)):
@@ -615,6 +615,15 @@ async def stripe_webhook(request:Request,session:Session=Depends(db)):
                     return {'received':True}
                 sync_billing(session,b,current)
     return {'received':True}
+
+@app.post('/api/auto-reminders/test',dependencies=[Depends(csrf_guard),Depends(write_access)])
+def test_reminder_mail(request:Request,user:User=Depends(me)):
+    if not integrations.brevo_ready() or user.email not in {x.strip().lower() for x in os.getenv('REMINDER_ALLOWED_ACCOUNTS','').split(',') if x.strip()}: raise HTTPException(403,'Test de messagerie non autorisé')
+    rate_limit(request,'test_email',2)
+    try:
+        integrations.send_mail(os.environ['BREVO_SENDER_EMAIL'],'OPERA AI — Test de messagerie','Bonjour, ceci est un message de test OPERA AI. Aucun document ni donnée client n’a été transmis.')
+    except Exception: raise HTTPException(502,'Envoi de test indisponible. Vérifiez la configuration Brevo.')
+    return {'ok':True}
 
 @app.get('/api/auto-reminders')
 def auto_list(user:User=Depends(me),session:Session=Depends(db)):
