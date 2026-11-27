@@ -551,6 +551,48 @@ def billing_portal(user:User=Depends(me),session:Session=Depends(db)):
     try: return {'url':integrations.stripe_request('billing_portal/sessions',{'customer':b.customer_id,'return_url':os.environ['PUBLIC_URL'].rstrip('/')+'/'} )['url']}
     except Exception: raise HTTPException(502,'Portail indisponible')
 
+def sync_billing(session,b,current):
+    items=current.get('items',{}).get('data',[])
+    price_id=items[0].get('price',{}).get('id') if len(items)==1 and items[0].get('quantity',1)==1 else None
+    plan=next((k for k,v in integrations.PLANS.items() if v[0]==price_id),'')
+    record=session.get(BillingPlan,b.org_id)
+    if not record: record=BillingPlan(org_id=b.org_id);session.add(record)
+    record.plan=plan
+    detail=session.get(BillingDetails,b.org_id)
+    if not detail: detail=BillingDetails(org_id=b.org_id);session.add(detail)
+    detail.cancel_pending=int(bool(current.get('cancel_at_period_end') or current.get('cancel_at')))
+    stamp=current.get('cancel_at') or current.get('current_period_end') or (items[0].get('current_period_end') if items else None)
+    detail.ends_at=datetime.fromtimestamp(stamp,timezone.utc).isoformat() if isinstance(stamp,(int,float)) else ''
+    b.subscription_id=current['id'];b.state=current['status'] if plan or current['status'] not in ('active','trialing') else 'unrecognized';session.commit()
+
+@app.post('/api/billing/manage',dependencies=[Depends(csrf_guard)])
+def manage_billing(request:Request, action:str, plan:str='', user:User=Depends(me),session:Session=Depends(db)):
+    rate_limit(request,'billing-manage',10)
+    if not integrations.billing_ready(): raise HTTPException(503,'Facturation test indisponible')
+    if action not in ('sync','cancel','resume','change'): raise HTTPException(422,'Action inconnue')
+    if engine.dialect.name=='postgresql': session.execute(text('SELECT pg_advisory_xact_lock(7831, :org)'),{'org':user.org_id})
+    b=session.get(Billing,user.org_id)
+    if not b or not b.subscription_id: raise HTTPException(404,'Aucun abonnement associé')
+    path='subscriptions/'+quote(b.subscription_id,safe='')
+    def verify(obj):
+        if obj.get('id')!=b.subscription_id or obj.get('customer')!=b.customer_id or obj.get('livemode') is not False: raise HTTPException(409,'Abonnement Stripe non reconnu')
+    try:
+        current=integrations.stripe_request(path);verify(current)
+        if action!='sync':
+            if current.get('status') not in ('active','trialing'): raise HTTPException(409,'Abonnement non actif')
+            if action=='change':
+                if plan not in integrations.PLANS: raise HTTPException(422,'Formule inconnue')
+                items=current.get('items',{}).get('data',[])
+                if len(items)!=1 or not items[0].get('id') or items[0].get('quantity',1)!=1: raise HTTPException(409,'Abonnement non compatible')
+                data={'items[0][id]':items[0]['id'],'items[0][price]':integrations.checked_price(plan),'proration_behavior':'none'}
+            elif action=='cancel': data={'cancel_at_period_end':'true'}
+            else: data={'cancel_at_period_end':'false'}
+            current=integrations.stripe_request(path,data);verify(current)
+        sync_billing(session,b,current)
+        return {'ok':True,'cancel_pending':bool(current.get('cancel_at_period_end') or current.get('cancel_at'))}
+    except HTTPException: raise
+    except Exception: raise HTTPException(502,'Stripe indisponible ou environnement incorrect. Actualisez le statut avant de réessayer.')
+
 @app.post('/webhooks/stripe')
 async def stripe_webhook(request:Request,session:Session=Depends(db)):
     if os.getenv('STRIPE_SECRET_KEY') and not os.getenv('STRIPE_SECRET_KEY','').startswith('sk_test_'): raise HTTPException(403,'Paiement réel désactivé')
@@ -571,18 +613,7 @@ async def stripe_webhook(request:Request,session:Session=Depends(db)):
                 # An old cancelled subscription must not overwrite a different active one.
                 if b.subscription_id and b.subscription_id!=current['id'] and current['status'] not in ('active','trialing') and b.state in ('active','trialing'):
                     return {'received':True}
-                items=current.get('items',{}).get('data',[])
-                price_id=items[0].get('price',{}).get('id') if len(items)==1 and items[0].get('quantity',1)==1 else None
-                plan=next((k for k,v in integrations.PLANS.items() if v[0]==price_id),'')
-                record=session.get(BillingPlan,b.org_id)
-                if not record: record=BillingPlan(org_id=b.org_id);session.add(record)
-                record.plan=plan
-                detail=session.get(BillingDetails,b.org_id)
-                if not detail: detail=BillingDetails(org_id=b.org_id);session.add(detail)
-                detail.cancel_pending=int(bool(current.get('cancel_at_period_end') or current.get('cancel_at')))
-                stamp=current.get('cancel_at') or current.get('current_period_end') or (items[0].get('current_period_end') if items else None)
-                detail.ends_at=datetime.fromtimestamp(stamp,timezone.utc).isoformat() if isinstance(stamp,(int,float)) else ''
-                b.subscription_id=current['id'];b.state=current['status'] if plan or current['status'] not in ('active','trialing') else 'unrecognized';session.commit()
+                sync_billing(session,b,current)
     return {'received':True}
 
 @app.get('/api/auto-reminders')
